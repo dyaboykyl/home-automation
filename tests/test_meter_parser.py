@@ -62,3 +62,35 @@ def test_parse_advertisement_manufacturer_fallback():
 def test_bot_command_encoding_without_password():
     assert ble._encode_bot_command(ble._BOT_PRESS, None) == bytes([0x57, 0x01, 0x00])
     assert ble._encode_bot_command(ble._BOT_ON, "") == bytes([0x57, 0x01, 0x01])
+
+
+class _FakeChar:
+    def __init__(self, uuid, properties):
+        self.uuid = uuid
+        self.properties = properties
+
+
+class _FakeService:
+    def __init__(self, characteristics):
+        self.characteristics = characteristics
+
+
+class _FakeClient:
+    def __init__(self, services):
+        self.services = services
+
+
+def test_find_command_char_matches_9fb8_revision():
+    # The Bot revision in the wild reports 9fb8, not the documented 9fb9.
+    client = _FakeClient([
+        _FakeService([_FakeChar("cba20003-224d-11e6-9fb8-0002a5d5c51b", ["notify"])]),
+        _FakeService([_FakeChar("cba20002-224d-11e6-9fb8-0002a5d5c51b", ["write-without-response", "write"])]),
+    ])
+    char = ble._find_command_char(client)
+    assert char is not None
+    assert char.uuid.startswith("cba20002")
+
+
+def test_find_command_char_none_when_absent():
+    client = _FakeClient([_FakeService([_FakeChar("00002a00-0000-1000-8000-00805f9b34fb", ["read"])])])
+    assert ble._find_command_char(client) is None

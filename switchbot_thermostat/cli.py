@@ -14,14 +14,15 @@ import argparse
 import asyncio
 import logging
 import sys
+from dataclasses import replace
 
-from . import __version__, ble
+from . import __version__, ble, runtime
 from .bot import Bot
 from .config import ConfigError, load_config
-from .controller import Controller, decide_heating
+from .controller import Controller, decide_heating, effective_settings
 from .logging_setup import configure_logging
 from .meter import Meter
-from .schedule import resolve_target
+from .runtime import Overrides
 from .state import State
 from datetime import datetime
 
@@ -42,9 +43,32 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("status", help="Show current temperature, target, and decision.")
     scan = sub.add_parser("scan", help="Discover nearby SwitchBot devices.")
     scan.add_argument("--timeout", type=float, default=10.0, help="Scan duration in seconds.")
-    sub.add_parser("press", help="Manually press the configured Bot.")
-    sub.add_parser("on", help="Manually switch the Bot ON.")
-    sub.add_parser("off", help="Manually switch the Bot OFF.")
+    for _name, _help in (
+        ("press", "Manually press the configured Bot."),
+        ("on", "Manually switch the Bot ON."),
+        ("off", "Manually switch the Bot OFF."),
+    ):
+        _p = sub.add_parser(_name, help=_help)
+        _p.add_argument(
+            "-f", "--force", action="store_true",
+            help="Send the command even when dry-run is on.",
+        )
+        _p.add_argument(
+            "-t", "--timeout", type=float, default=12.0,
+            help="Per-attempt BLE timeout in seconds (default 12; manual commands try once).",
+        )
+
+    sub.add_parser("config", help="Show effective settings (config + live overrides).")
+    settable = ", ".join(runtime.SETTABLE)
+    sset = sub.add_parser("set", help=f"Set a live override ({settable}).")
+    sset.add_argument("key", choices=list(runtime.SETTABLE))
+    sset.add_argument("value")
+    sget = sub.add_parser("get", help="Get the current value of a setting.")
+    sget.add_argument("key", choices=list(runtime.SETTABLE))
+    sunset = sub.add_parser("unset", help="Clear a live override (revert to config.yaml).")
+    sunset.add_argument("key", choices=list(runtime.SETTABLE))
+    sub.add_parser("pause", help="Pause actuation (keep reading/logging, never press).")
+    sub.add_parser("resume", help="Resume actuation after a pause.")
     return parser
 
 
@@ -79,33 +103,116 @@ async def _cmd_read(cfg) -> int:
 
 
 async def _cmd_status(cfg) -> int:
-    reading = await Meter(cfg.meter).read()
     state = State.load(cfg.state_file)
+    overrides = Overrides.load(cfg.overrides_file)
+    eff = effective_settings(cfg, overrides, datetime.now())
+    reading = await Meter(cfg.meter).read()
     if reading is None:
         print("No reading available.")
         return 1
-    unit = cfg.control.unit
+    unit = eff.control.unit
     symbol = "F" if unit == "fahrenheit" else "C"
     temperature = reading.temperature(unit)
-    target = resolve_target(datetime.now(), cfg.schedule, cfg.control)
-    decision = decide_heating(temperature, target, state.heating, cfg.control, cfg.safety)
+    decision = decide_heating(temperature, eff.target, state.heating, eff.control, cfg.safety)
     print(f"Temperature:  {temperature:.1f}{symbol}")
-    print(f"Target:       {target:.1f}{symbol}  (±{cfg.control.hysteresis}{symbol} deadband)")
+    print(f"Target:       {eff.target:.1f}{symbol}  (±{eff.control.hysteresis}{symbol} deadband, from {eff.target_source})")
+    print(f"Mode:         {eff.control.action}  (bot: {cfg.bot.mode})")
     print(f"Believed:     {'HEATING' if state.heating else 'OFF'}")
     print(f"Desired:      {'HEATING' if decision.desired_heating else 'OFF'}  ({decision.reason})")
-    if decision.desired_heating != state.heating:
+    if eff.dry_run:
+        print("Dry-run:      ON (will not press the Bot)")
+    if eff.paused:
+        print("Paused:       YES (actuation suspended)")
+    if eff.paused:
+        print("-> Paused: no action will be taken.")
+    elif decision.desired_heating != state.heating:
         print("-> Next cycle would actuate the Bot (subject to min_cycle_time).")
     else:
         print("-> No change needed.")
     return 0
 
 
-async def _cmd_bot(cfg, command: str) -> int:
-    bot = Bot(cfg.bot)
-    if cfg.safety.dry_run:
-        print(f"[dry-run] Would send '{command}' to bot {cfg.bot.mac}.")
+def _cmd_config(cfg) -> int:
+    overrides = Overrides.load(cfg.overrides_file)
+    eff = effective_settings(cfg, overrides, datetime.now())
+    unit = eff.control.unit
+    symbol = "F" if unit == "fahrenheit" else "C"
+    print("Devices:")
+    print(f"  meter.mac          {cfg.meter.mac}")
+    print(f"  bot.mac            {cfg.bot.mac}  (mode: {cfg.bot.mode})")
+    print("Settings (effective value <- source):")
+    print(f"  target             {eff.target:.1f}{symbol}   <- {eff.target_source}")
+    print(f"  hysteresis         {eff.control.hysteresis}{symbol}")
+    print(f"  action             {eff.control.action}")
+    print(f"  dry-run            {'on' if eff.dry_run else 'off'}")
+    print(f"  paused             {'yes' if eff.paused else 'no'}")
+    print(f"  poll_interval      {cfg.control.poll_interval:.0f}s")
+    print(f"  min_cycle_time     {cfg.control.min_cycle_time:.0f}s")
+    active = {k: runtime.get_value(overrides, k) for k in runtime.SETTABLE
+              if runtime.get_value(overrides, k) is not None}
+    if active or overrides.paused:
+        print("Live overrides active (use `unset <key>` to clear):")
+        for k, v in active.items():
+            print(f"  {k} = {v}")
+        if overrides.paused:
+            print("  paused = true")
+    return 0
+
+
+def _cmd_set(cfg, key: str, value: str) -> int:
+    overrides = Overrides.load(cfg.overrides_file)
+    try:
+        runtime.set_value(overrides, key, value)
+    except ValueError as exc:
+        print(f"Invalid value for '{key}': {exc}", file=sys.stderr)
+        return 2
+    overrides.save(cfg.overrides_file)
+    print(f"Set {key} = {runtime.get_value(overrides, key)} (takes effect next cycle).")
+    return 0
+
+
+def _cmd_get(cfg, key: str) -> int:
+    overrides = Overrides.load(cfg.overrides_file)
+    value = runtime.get_value(overrides, key)
+    print(f"{key} = {value if value is not None else '(unset; using config.yaml)'}")
+    return 0
+
+
+def _cmd_unset(cfg, key: str) -> int:
+    overrides = Overrides.load(cfg.overrides_file)
+    runtime.clear_value(overrides, key)
+    overrides.save(cfg.overrides_file)
+    print(f"Cleared override '{key}' (reverts to config.yaml next cycle).")
+    return 0
+
+
+def _cmd_pause(cfg, paused: bool) -> int:
+    overrides = Overrides.load(cfg.overrides_file)
+    overrides.paused = paused
+    overrides.save(cfg.overrides_file)
+    print("Actuation paused." if paused else "Actuation resumed.")
+    return 0
+
+
+async def _cmd_bot(cfg, command: str, force: bool = False, timeout: float = 12.0) -> int:
+    # Manual commands fail fast: a single attempt with a short timeout, so the
+    # user isn't left waiting through the control loop's retry/backoff sequence.
+    bot = Bot(replace(cfg.bot, connect_retries=1, connect_timeout=timeout))
+    overrides = Overrides.load(cfg.overrides_file)
+    dry_run = effective_settings(cfg, overrides, datetime.now()).dry_run
+    if dry_run and not force:
+        print(
+            f"[dry-run] Would send '{command}' to bot {cfg.bot.mac}. "
+            "Use --force to send it for real."
+        )
         return 0
-    await {"press": bot.press, "on": bot.turn_on, "off": bot.turn_off}[command]()
+    if dry_run:
+        print(f"[dry-run override] Forcing real '{command}'...")
+    try:
+        await {"press": bot.press, "on": bot.turn_on, "off": bot.turn_off}[command]()
+    except Exception as exc:
+        print(f"Failed to send '{command}' to bot {cfg.bot.mac}: {exc}", file=sys.stderr)
+        return 1
     print(f"Sent '{command}' to bot {cfg.bot.mac}.")
     return 0
 
@@ -133,6 +240,19 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     configure_logging(cfg.logging)
+
+    # Synchronous (no BLE) commands.
+    if args.command == "config":
+        return _cmd_config(cfg)
+    if args.command == "set":
+        return _cmd_set(cfg, args.key, args.value)
+    if args.command == "get":
+        return _cmd_get(cfg, args.key)
+    if args.command == "unset":
+        return _cmd_unset(cfg, args.key)
+    if args.command in ("pause", "resume"):
+        return _cmd_pause(cfg, args.command == "pause")
+
     try:
         if args.command == "run":
             return asyncio.run(_cmd_run(cfg))
@@ -141,7 +261,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "status":
             return asyncio.run(_cmd_status(cfg))
         if args.command in ("press", "on", "off"):
-            return asyncio.run(_cmd_bot(cfg, args.command))
+            return asyncio.run(_cmd_bot(cfg, args.command, force=args.force, timeout=args.timeout))
     except KeyboardInterrupt:
         print("\nInterrupted.", file=sys.stderr)
         return 130

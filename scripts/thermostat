@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+#
+# Remote control for the SwitchBot thermostat running on the Raspberry Pi.
+# Run this from your Mac; it executes commands on the Pi over SSH.
+#
+# Setup: this relies on an SSH host alias (default "thermostat"). Override with
+#   export THERMOSTAT_HOST=pi@192.168.1.50
+#
+# Examples:
+#   thermostat read                 # current temperature
+#   thermostat status               # temp, target, and what it would do
+#   thermostat set target 22        # change target temperature (live)
+#   thermostat get target
+#   thermostat config               # show all effective settings
+#   thermostat press                # manually press the Bot
+#   thermostat pause / resume       # suspend / resume actuation
+#   thermostat service status       # systemd service state
+#   thermostat logs                 # follow the live service log
+#   thermostat deploy               # push local code changes to the Pi + restart
+#   thermostat ssh                  # open a shell on the Pi
+set -euo pipefail
+
+HOST="${THERMOSTAT_HOST:-thermostat}"
+DIR="${THERMOSTAT_DIR:-\$HOME/home-automation}"   # remote dir; \$HOME expands on the Pi
+SERVICE="switchbot-thermostat.service"
+BIN="$DIR/.venv/bin/switchbot-thermostat -c $DIR/config.yaml"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"  # local repo root
+
+PASSTHROUGH="read status scan press on off config set get unset pause resume"
+
+usage() {
+  sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  exit "${1:-0}"
+}
+
+cmd="${1:-}"; [ $# -gt 0 ] && shift || true
+
+case "$cmd" in
+  ""|-h|--help|help)
+    usage 0
+    ;;
+  logs)
+    exec ssh -t "$HOST" "sudo journalctl -u $SERVICE -n 50 -f"
+    ;;
+  service)
+    action="${1:-status}"
+    case "$action" in
+      status) exec ssh -t "$HOST" "systemctl status $SERVICE --no-pager" ;;
+      start|stop|restart|enable|disable)
+        exec ssh -t "$HOST" "sudo systemctl $action $SERVICE && systemctl is-active $SERVICE || true" ;;
+      *) echo "Unknown service action: $action" >&2; exit 2 ;;
+    esac
+    ;;
+  enable-service)   # convenience: enable + start at boot
+    exec ssh -t "$HOST" "sudo systemctl enable --now $SERVICE"
+    ;;
+  ssh)
+    exec ssh -t "$HOST"
+    ;;
+  deploy)
+    echo "Syncing local code to $HOST:$DIR ..."
+    rsync -az --delete \
+      --exclude '.venv' --exclude '.git' --exclude '__pycache__' \
+      --exclude '.pytest_cache' --exclude '*.egg-info' \
+      --exclude 'config.yaml' --exclude 'state.json' --exclude 'overrides.json' \
+      "$SCRIPT_DIR/" "$HOST:$DIR/"
+    # The package is installed editable, so synced source is picked up directly —
+    # no wheel rebuild needed. Only restart if the service is already running.
+    ssh "$HOST" "if systemctl is-active --quiet $SERVICE; then sudo systemctl restart $SERVICE && echo 'service restarted'; \
+      else echo 'service not running (not started)'; fi"
+    echo "Done."
+    ;;
+  *)
+    # Pass everything else straight to the on-Pi CLI.
+    for p in $PASSTHROUGH; do
+      if [ "$cmd" = "$p" ]; then
+        exec ssh "$HOST" "$BIN $cmd $*"
+      fi
+    done
+    echo "Unknown command: $cmd" >&2
+    usage 2
+    ;;
+esac

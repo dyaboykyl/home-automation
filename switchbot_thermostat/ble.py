@@ -31,9 +31,11 @@ METER_SERVICE_UUIDS = (
     "cba20d00-224d-11e6-9fb9-0002a5d5c51b",  # legacy
 )
 
-# Bot (WoHand) GATT handles.
-BOT_CMD_CHAR = "cba20002-224d-11e6-9fb9-0002a5d5c51b"
-BOT_NOTIFY_CHAR = "cba20003-224d-11e6-9fb9-0002a5d5c51b"
+# Bot (WoHand) GATT handles. The 4th UUID group varies by hardware revision
+# (9fb8 vs 9fb9 seen in the wild), so we match on the stable prefix instead of
+# a fixed UUID and discover the actual characteristic after connecting.
+BOT_CMD_CHAR_PREFIX = "cba20002"
+BOT_NOTIFY_CHAR_PREFIX = "cba20003"
 
 # Bot command payloads (no password). Magic byte 0x57, group 0x01.
 _BOT_PRESS = bytes([0x57, 0x01, 0x00])
@@ -162,6 +164,18 @@ def _encode_bot_command(base: bytes, password: str | None) -> bytes:
     return bytes([0x57, 0x11, action]) + crc.to_bytes(4, "big")
 
 
+def _find_command_char(client):
+    """Return the Bot's writable command characteristic, matched by prefix."""
+    for service in client.services:
+        for ch in service.characteristics:
+            props = ch.properties
+            if ch.uuid.lower().startswith(BOT_CMD_CHAR_PREFIX) and (
+                "write" in props or "write-without-response" in props
+            ):
+                return ch
+    return None
+
+
 async def send_bot_command(
     mac: str,
     command: str,
@@ -184,7 +198,13 @@ async def send_bot_command(
     for attempt in range(1, retries + 1):
         try:
             async with BleakClient(mac, timeout=timeout) as client:
-                await client.write_gatt_char(BOT_CMD_CHAR, payload, response=True)
+                char = _find_command_char(client)
+                if char is None:
+                    raise RuntimeError(
+                        f"No SwitchBot command characteristic ({BOT_CMD_CHAR_PREFIX}*) "
+                        f"on {mac}; is this device a SwitchBot Bot?"
+                    )
+                await client.write_gatt_char(char, payload, response=True)
             _LOGGER.info("Bot %s: sent %s command", mac, command)
             return
         except Exception as exc:  # bleak raises a wide range of errors

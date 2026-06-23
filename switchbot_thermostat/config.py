@@ -190,6 +190,7 @@ class Config:
     safety: SafetyConfig
     logging: LoggingConfig
     state_file: str = "state.json"
+    overrides_file: str = "overrides.json"
 
     @classmethod
     def from_dict(cls, d: dict) -> "Config":
@@ -203,6 +204,7 @@ class Config:
             safety=SafetyConfig.from_dict(d.get("safety")),
             logging=LoggingConfig.from_dict(d.get("logging")),
             state_file=str(d.get("state_file", "state.json")),
+            overrides_file=str(d.get("overrides_file", "overrides.json")),
         )
 
 

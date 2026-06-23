@@ -65,6 +65,7 @@ All behaviour lives in `config.yaml` (copy from `config.example.yaml`). The most
 important knobs:
 
 - `control.target_temperature`, `control.hysteresis`, `control.unit`
+- `control.action` — `heat` (actuator on when too cold; for heating) or `cool` (on when too warm; for AC)
 - `control.min_cycle_time` — anti-short-cycle protection
 - `bot.mode` — `toggle` / `switch` / `momentary`, plus `bot.invert`
 - `schedule` — optional weekly setback (e.g. cooler at night)
@@ -80,8 +81,52 @@ Every option is commented in `config.example.yaml`.
 | `scan`    | discover nearby SwitchBot devices and their MAC addresses     |
 | `read`    | take a single temperature reading                             |
 | `status`  | show current temp, target, and the decision the loop would make |
-| `press` / `on` / `off` | manually drive the Bot to test wiring            |
+| `config`  | show all effective settings (config + live overrides)         |
+| `set <key> <value>` | change a live setting (`target`, `hysteresis`, `action`, `dry-run`) |
+| `get <key>` / `unset <key>` | read / clear a live override               |
+| `pause` / `resume` | suspend / resume actuation (keeps reading + logging) |
+| `press` / `on` / `off` | manually drive the Bot (add `--force` to send even in dry-run; `--timeout` to adjust) |
 | `run`     | start the control loop (what the systemd service runs)        |
+
+Manual `press`/`on`/`off` respect dry-run by default. Pass `--force` to send a
+real command even while dry-run is on — handy for testing the Bot before going
+live. They try once and fail fast (default 12s, tune with `--timeout`), unlike
+the control loop which retries.
+
+### Live settings
+
+`config.yaml` holds the fixed setup (device addresses, Bot mode, schedule).
+Day-to-day knobs are stored separately in `overrides.json` and applied on top,
+so the running service picks up a change on its **next poll — no restart**:
+
+```bash
+switchbot-thermostat set target 22       # raise the target to 22°
+switchbot-thermostat set dry-run on       # log decisions without pressing
+switchbot-thermostat pause                # stop actuating (e.g. while away)
+switchbot-thermostat unset target         # revert to config.yaml's value
+```
+
+## Remote control from your Mac
+
+`scripts/thermostat` is a wrapper that runs any of the above on the Pi over SSH
+(via the `thermostat` host alias). Symlink it onto your PATH and drive the Pi
+from your laptop:
+
+```bash
+thermostat read                 # current temperature
+thermostat status               # temp, target, and what it would do
+thermostat set target 22        # change target temperature (live)
+thermostat config               # show all effective settings
+thermostat press                # manually press the Bot
+thermostat pause / resume       # suspend / resume actuation
+thermostat service status       # systemd service state
+thermostat enable-service       # start now + on every boot
+thermostat logs                 # follow the live service log
+thermostat deploy               # push local code changes to the Pi + restart
+thermostat ssh                  # open a shell on the Pi
+```
+
+Override the target host with `export THERMOSTAT_HOST=pi@192.168.1.50`.
 
 ## Development
 

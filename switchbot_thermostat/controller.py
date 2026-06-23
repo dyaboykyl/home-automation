@@ -5,17 +5,46 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 from .bot import Bot
 from .config import Config, ControlConfig, SafetyConfig
 from .meter import Meter
 from .models import Reading
+from .runtime import Overrides
 from .schedule import resolve_target
 from .state import State
 
 _LOGGER = logging.getLogger(__name__)
+
+
+@dataclass
+class Effective:
+    """Config values after live overrides are applied for one evaluation."""
+
+    control: ControlConfig
+    target: float
+    dry_run: bool
+    paused: bool
+    target_source: str  # override | schedule | config
+
+
+def effective_settings(config: Config, overrides: Overrides, now: datetime) -> Effective:
+    """Merge static config with live overrides into the values used this cycle."""
+    control = replace(
+        config.control,
+        hysteresis=overrides.hysteresis if overrides.hysteresis is not None else config.control.hysteresis,
+        action=overrides.action if overrides.action is not None else config.control.action,
+    )
+    if overrides.target_temperature is not None:
+        target, source = overrides.target_temperature, "override"
+    elif config.schedule.enabled and config.schedule.periods:
+        target, source = resolve_target(now, config.schedule, control), "schedule"
+    else:
+        target, source = control.target_temperature, "config"
+    dry_run = overrides.dry_run if overrides.dry_run is not None else config.safety.dry_run
+    return Effective(control, target, dry_run, overrides.paused, source)
 
 
 @dataclass
@@ -87,35 +116,36 @@ class Controller:
 
     async def tick(self) -> Decision | None:
         """Run one evaluation: read, decide, and actuate if needed."""
+        overrides = Overrides.load(self._config.overrides_file)
+        eff = effective_settings(self._config, overrides, self._now_fn())
+
         reading = await self._meter.read()
         if reading is None:
             _LOGGER.warning("No meter reading this cycle; leaving thermostat unchanged.")
             return None
 
-        unit = self._config.control.unit
+        unit = eff.control.unit
         temperature = reading.temperature(unit)
-        target = resolve_target(self._now_fn(), self._config.schedule, self._config.control)
-
         decision = decide_heating(
-            temperature,
-            target,
-            self._state.heating,
-            self._config.control,
-            self._config.safety,
+            temperature, eff.target, self._state.heating, eff.control, self._config.safety
         )
 
         symbol = "°F" if unit == "fahrenheit" else "°C"
         _LOGGER.info(
-            "temp=%.1f%s target=%.1f%s desired=%s (%s) current=%s",
-            temperature, symbol, target, symbol,
+            "temp=%.1f%s target=%.1f%s (%s) desired=%s (%s) current=%s%s",
+            temperature, symbol, eff.target, symbol, eff.target_source,
             "HEAT" if decision.desired_heating else "OFF",
             decision.reason,
             "HEAT" if self._state.heating else "OFF",
+            " [PAUSED]" if eff.paused else "",
         )
-        await self._actuate(decision)
+
+        if eff.paused:
+            return decision  # evaluate and log, but never actuate while paused
+        await self._actuate(decision, dry_run=eff.dry_run)
         return decision
 
-    async def _actuate(self, decision: Decision) -> None:
+    async def _actuate(self, decision: Decision, *, dry_run: bool) -> None:
         if decision.desired_heating == self._state.heating:
             return  # already in the desired state
 
@@ -129,7 +159,7 @@ class Controller:
             )
             return
 
-        if self._config.safety.dry_run:
+        if dry_run:
             _LOGGER.warning(
                 "[dry-run] Would set thermostat to %s.",
                 "HEAT" if decision.desired_heating else "OFF",

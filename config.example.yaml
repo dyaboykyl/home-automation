@@ -24,6 +24,9 @@ control:
   hysteresis: 0.5              # deadband: heat on below target-0.5, off above target+0.5
   poll_interval: 60            # seconds between evaluations
   min_cycle_time: 300          # minimum seconds between Bot presses (anti short-cycle)
+  # action controls which way the thermostat drives the temperature:
+  #   heat -> actuator ON when too COLD  (below target-hysteresis); use for heating
+  #   cool -> actuator ON when too WARM  (above target+hysteresis); use for AC/cooling
   action: heat                 # heat | cool
 
 # Optional weekly schedule. When enabled, the period whose start time most

@@ -147,3 +147,4 @@ sudo systemctl restart switchbot-thermostat.service
 | Permission/`org.bluez` errors | the service runs with `CAP_NET_ADMIN`/`CAP_NET_RAW`; if running by hand, your user must be able to use Bluetooth (it normally can on Raspberry Pi OS) |
 | Heat toggles too often | raise `control.hysteresis` and/or `control.min_cycle_time` |
 | State seems "stuck" after manual changes | delete `state.json` and restart to reset the believed on/off state |
+| Pi drops off the network while idle (`.local` and IP both unreachable, but PWR LED solid) | Wi-Fi power-save on the Pi 3's shared radio. `install.sh` disables it via the `wifi-powersave-off.service`; check `iw dev wlan0 get power_save` (should say "off"). For a 24/7 setup, wired **Ethernet** is the most reliable fix. |

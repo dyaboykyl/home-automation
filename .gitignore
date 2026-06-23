@@ -1,0 +1,14 @@
+# Local configuration and runtime state (never commit device addresses/state).
+config.yaml
+state.json
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+build/
+dist/

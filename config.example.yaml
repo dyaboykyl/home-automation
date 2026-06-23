@@ -1,0 +1,57 @@
+# SwitchBot Thermostat configuration.
+# Copy this file to config.yaml and edit it for your devices.
+# Discover device MAC addresses with: switchbot-thermostat scan
+
+meter:
+  mac: "AA:BB:CC:DD:EE:FF"     # SwitchBot Meter BLE address
+  scan_timeout: 30             # seconds to wait for an advertisement
+  temperature_offset: 0.0      # calibration offset added to the raw reading (°C)
+  max_reading_age: 300         # ignore readings older than this many seconds
+
+bot:
+  mac: "11:22:33:44:55:66"     # SwitchBot Bot BLE address (the button pusher)
+  mode: toggle                 # toggle: one press flips heat on/off (your setup)
+                               # switch: Bot held = on, released = off
+                               # momentary: a press triggers a temporary action
+  password: null               # set only if you configured a Bot password in the app
+  connect_retries: 3
+  connect_timeout: 20
+  invert: false                # set true if "heat on" should map to a released Bot
+
+control:
+  unit: celsius                # celsius | fahrenheit (applies to every threshold below)
+  target_temperature: 21.0     # desired room temperature
+  hysteresis: 0.5              # deadband: heat on below target-0.5, off above target+0.5
+  poll_interval: 60            # seconds between evaluations
+  min_cycle_time: 300          # minimum seconds between Bot presses (anti short-cycle)
+  action: heat                 # heat | cool
+
+# Optional weekly schedule. When enabled, the period whose start time most
+# recently passed sets the target. Disable to always use target_temperature.
+schedule:
+  enabled: false
+  periods:
+    - days: [mon, tue, wed, thu, fri]
+      start: "06:30"
+      target: 21.0
+    - days: [mon, tue, wed, thu, fri]
+      start: "22:00"
+      target: 17.0
+    - days: [sat, sun]
+      start: "08:00"
+      target: 21.0
+    - days: [sat, sun]
+      start: "23:00"
+      target: 17.0
+
+safety:
+  min_temperature: 5.0         # frost protection: always heat below this (null to disable)
+  max_temperature: 30.0        # overheat cutoff: always stop heating above this (null to disable)
+  dry_run: false               # true = log actions but never actually press the Bot
+
+logging:
+  level: INFO                  # DEBUG | INFO | WARNING | ERROR
+  file: null                   # null = log to stdout (journald under systemd)
+
+# Where to persist believed thermostat state between runs.
+state_file: "state.json"

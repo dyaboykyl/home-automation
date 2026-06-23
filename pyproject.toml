@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "switchbot-thermostat"
+version = "1.0.0"
+description = "Configurable thermostat for Raspberry Pi using a SwitchBot Meter and Bot over Bluetooth LE."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Zack Brandes" }]
+dependencies = [
+    "bleak>=0.21",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+switchbot-thermostat = "switchbot_thermostat.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["switchbot_thermostat*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,149 @@
+# Deploying to a Raspberry Pi 3
+
+This walks you through getting the thermostat running on a Raspberry Pi 3 from a
+fresh SD card to a running, auto-starting service.
+
+## 1. Prepare the Pi
+
+Flash **Raspberry Pi OS Lite (64-bit)** with Raspberry Pi Imager. In the
+Imager's settings (gear icon) set the hostname, enable **SSH**, and configure
+Wi-Fi — then you can run the Pi headless.
+
+> Note: the Pi 3 shares one antenna between Wi-Fi and Bluetooth. If BLE scans
+> are flaky, prefer a wired Ethernet connection, or keep the Meter/Bot within a
+> few metres of the Pi.
+
+Boot the Pi and SSH in:
+
+```bash
+ssh pi@raspberrypi.local
+```
+
+Update the OS and make sure the Bluetooth stack is present:
+
+```bash
+sudo apt-get update && sudo apt-get upgrade -y
+sudo apt-get install -y git python3-venv python3-pip bluez
+sudo systemctl enable --now bluetooth
+bluetoothctl --version    # confirm BlueZ >= 5.43
+```
+
+## 2. Get the code onto the Pi
+
+Pick whichever is convenient:
+
+**Option A — clone from git (recommended):**
+```bash
+cd ~
+git clone <your-repo-url> home-automation
+cd home-automation
+```
+
+**Option B — copy from your computer with rsync/scp:**
+```bash
+# Run this on your laptop, from the project directory:
+rsync -av --exclude .venv --exclude .git ./ pi@raspberrypi.local:~/home-automation/
+# then SSH into the Pi and: cd ~/home-automation
+```
+
+## 3. Install
+
+```bash
+./scripts/install.sh
+```
+
+This creates a virtualenv in `.venv`, installs the package and its
+dependencies (`bleak`, `PyYAML`), copies `config.example.yaml` to `config.yaml`,
+and installs a systemd unit with the paths/user rewritten to match this
+checkout. It does **not** start the service yet.
+
+## 4. Discover your devices
+
+```bash
+.venv/bin/switchbot-thermostat scan
+```
+
+You'll see something like:
+
+```
+  E1:22:33:44:55:66  rssi= -58   21.4C  meter      Meter
+  C2:33:44:55:66:77  rssi= -61    -     bot/other  Bot
+```
+
+The device showing a temperature is your **Meter**; the other is the **Bot**.
+Copy each address into `config.yaml`.
+
+> Can't tell them apart? Open the SwitchBot phone app → device → Settings →
+> *Device Info* shows the BLE MAC for each.
+
+## 5. Configure
+
+```bash
+nano config.yaml
+```
+
+At minimum set:
+
+```yaml
+meter:
+  mac: "E1:22:33:44:55:66"
+bot:
+  mac: "C2:33:44:55:66:77"
+  mode: toggle
+control:
+  target_temperature: 21.0
+  hysteresis: 0.5
+```
+
+Tip: start with `safety: { dry_run: true }` so the loop logs what it *would* do
+without actually pressing the Bot. Watch a few cycles, confirm the decisions
+look right, then set `dry_run: false`.
+
+## 6. Test before going live
+
+```bash
+# Sensor:
+.venv/bin/switchbot-thermostat -c config.yaml read
+# Decision the loop would make right now:
+.venv/bin/switchbot-thermostat -c config.yaml status
+# Button (make sure the Bot physically presses the thermostat):
+.venv/bin/switchbot-thermostat -c config.yaml press
+```
+
+## 7. Run it as a service
+
+```bash
+sudo systemctl enable --now switchbot-thermostat.service
+systemctl status switchbot-thermostat.service
+journalctl -u switchbot-thermostat.service -f      # live logs
+```
+
+`enable --now` starts it immediately **and** makes it start on every boot.
+`Restart=on-failure` in the unit means it recovers automatically from transient
+BLE errors.
+
+## 8. Updating later
+
+```bash
+cd ~/home-automation
+git pull                       # or rsync again
+.venv/bin/pip install .        # reinstall the package
+sudo systemctl restart switchbot-thermostat.service
+```
+
+If you edit `config.yaml`, just restart the service to pick up changes:
+
+```bash
+sudo systemctl restart switchbot-thermostat.service
+```
+
+## Troubleshooting
+
+| symptom | fix |
+|---|---|
+| `scan` finds nothing | `sudo systemctl status bluetooth`; ensure `bluez` installed; move devices closer |
+| "No advertisement from meter…within 30s" | wrong `meter.mac`, Meter out of range, or radio busy — increase `meter.scan_timeout`, try wired Ethernet |
+| Bot connect errors / timeouts | Bot out of range or busy; increase `bot.connect_retries`/`connect_timeout`; make sure the SwitchBot app isn't connected to it at the same time |
+| Permission/`org.bluez` errors | the service runs with `CAP_NET_ADMIN`/`CAP_NET_RAW`; if running by hand, your user must be able to use Bluetooth (it normally can on Raspberry Pi OS) |
+| Heat toggles too often | raise `control.hysteresis` and/or `control.min_cycle_time` |
+| State seems "stuck" after manual changes | delete `state.json` and restart to reset the believed on/off state |

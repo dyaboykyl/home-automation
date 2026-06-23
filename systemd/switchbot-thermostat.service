@@ -1,0 +1,25 @@
+[Unit]
+Description=SwitchBot Thermostat (Meter -> Bot control loop)
+Documentation=https://github.com/your/home-automation
+After=bluetooth.target network-online.target
+Wants=bluetooth.target
+
+[Service]
+Type=simple
+# Adjust User and paths to match your installation.
+User=pi
+WorkingDirectory=/home/pi/home-automation
+ExecStart=/home/pi/home-automation/.venv/bin/switchbot-thermostat --config /home/pi/home-automation/config.yaml run
+Restart=on-failure
+RestartSec=10
+# Let the daemon talk to BlueZ without running as full root.
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+
+# Basic hardening.
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=false
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

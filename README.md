@@ -107,6 +107,22 @@ switchbot-thermostat pause                # stop actuating (e.g. while away)
 switchbot-thermostat unset target         # revert to config.yaml's value
 ```
 
+## Phone control (web app / PWA)
+
+The `run` daemon also serves a mobile web UI (no app store, no sideloading). On
+your phone's browser, go to `http://<pi-ip>:8080` — it shows the live
+temperature, target (with +/- stepper), mode, pause/auto, and manual on/off,
+and updates every few seconds. Use **Add to Home Screen** for an app-like icon.
+
+- The web server runs **inside** the control-loop daemon, sharing one Bluetooth
+  lock — so the UI and the automation never fight over the radio.
+- Find the URL quickly with `thermostat url` (or `thermostat open` on a Mac).
+- It works on your home Wi-Fi. For remote (away-from-home) access later, set
+  `web.auth_token` in `config.yaml` and put it behind a VPN/tunnel (e.g.
+  Tailscale) — the UI already sends the token, so no rewrite is needed.
+
+Configure it under `web:` in `config.yaml` (`enabled`, `host`, `port`, `auth_token`).
+
 ## Remote control from your Mac
 
 `scripts/thermostat` is a wrapper that runs any of the above on the Pi over SSH

@@ -94,8 +94,52 @@ def decide_heating(
     return Decision(temperature, target, previous, "within deadband -> hold")
 
 
+def build_status(
+    config: Config,
+    overrides: Overrides,
+    state: State,
+    reading: Reading | None,
+    reading_age: float | None,
+    now: datetime,
+) -> dict:
+    """Build a JSON-serialisable status snapshot (used by the web API and tests)."""
+    eff = effective_settings(config, overrides, now)
+    unit = eff.control.unit
+    temperature = reading.temperature(unit) if reading is not None else None
+    decision = (
+        decide_heating(temperature, eff.target, state.heating, eff.control, config.safety)
+        if temperature is not None
+        else None
+    )
+    return {
+        "temperature": round(temperature, 1) if temperature is not None else None,
+        "unit": unit,
+        "humidity": reading.humidity if reading else None,
+        "battery": reading.battery if reading else None,
+        "rssi": reading.rssi if reading else None,
+        "reading_age": round(reading_age, 1) if reading_age is not None else None,
+        "target": round(eff.target, 1),
+        "target_source": eff.target_source,
+        "hysteresis": eff.control.hysteresis,
+        "action": eff.control.action,
+        "believed": state.heating,
+        "desired": decision.desired_heating if decision else None,
+        "reason": decision.reason if decision else None,
+        "dry_run": eff.dry_run,
+        "paused": eff.paused,
+        "bot_mode": config.bot.mode,
+        "min_cycle_time": config.control.min_cycle_time,
+    }
+
+
 class Controller:
-    """Owns the meter, bot, persisted state, and the evaluation loop."""
+    """Owns the meter, bot, persisted state, and the evaluation loop.
+
+    All Bluetooth access (meter reads and Bot commands, from both the control
+    loop and the web API) is serialised through ``_ble_lock`` so the single
+    radio is never used by two coroutines at once. The latest reading is cached
+    so the web UI can show status instantly without forcing a new scan.
+    """
 
     def __init__(
         self,
@@ -113,16 +157,70 @@ class Controller:
         self._state = state
         self._now_fn = now_fn  # wall datetime, for schedule resolution
         self._clock = clock  # epoch seconds, for min-cycle timing
+        self._ble_lock = asyncio.Lock()
+        self._last_reading: Reading | None = None
+        self._last_reading_ts: float = 0.0
 
+    # -- status / web-facing API ------------------------------------------- #
+    def get_status(self) -> dict:
+        """Current status snapshot from the cached reading + live files."""
+        overrides = Overrides.load(self._config.overrides_file)
+        state = State.load(self._config.state_file)
+        age = (self._clock() - self._last_reading_ts) if self._last_reading else None
+        return build_status(
+            self._config, overrides, state, self._last_reading, age, self._now_fn()
+        )
+
+    async def refresh(self) -> dict:
+        """Force a live meter read (serialised on the BLE lock), return status."""
+        async with self._ble_lock:
+            reading = await self._meter.read()
+        if reading is not None:
+            self._last_reading = reading
+            self._last_reading_ts = self._clock()
+        return self.get_status()
+
+    async def apply_output(self, on: bool, *, force: bool = False) -> dict:
+        """Manually drive the actuator to on/off and record the believed state."""
+        state = State.load(self._config.state_file)
+        overrides = Overrides.load(self._config.overrides_file)
+        dry_run = (
+            overrides.dry_run if overrides.dry_run is not None else self._config.safety.dry_run
+        )
+        if on == state.heating:
+            return {"changed": False, "reason": "already in that state", "heating": on}
+        if dry_run and not force:
+            return {"changed": False, "dry_run": True, "heating": state.heating}
+        async with self._ble_lock:
+            await self._bot.apply(on)
+        state.heating = on
+        state.last_action_ts = self._clock()
+        state.save(self._config.state_file)
+        self._state = state
+        return {"changed": True, "heating": on}
+
+    def correct_state(self, on: bool) -> None:
+        """Set the believed state without touching hardware (clears cycle timer)."""
+        state = State.load(self._config.state_file)
+        state.heating = on
+        state.last_action_ts = 0.0
+        state.save(self._config.state_file)
+        self._state = state
+
+    # -- control loop ------------------------------------------------------ #
     async def tick(self) -> Decision | None:
         """Run one evaluation: read, decide, and actuate if needed."""
+        self._state = State.load(self._config.state_file)  # pick up external corrections
         overrides = Overrides.load(self._config.overrides_file)
         eff = effective_settings(self._config, overrides, self._now_fn())
 
-        reading = await self._meter.read()
+        async with self._ble_lock:
+            reading = await self._meter.read()
         if reading is None:
             _LOGGER.warning("No meter reading this cycle; leaving thermostat unchanged.")
             return None
+        self._last_reading = reading
+        self._last_reading_ts = self._clock()
 
         unit = eff.control.unit
         temperature = reading.temperature(unit)
@@ -134,9 +232,9 @@ class Controller:
         _LOGGER.info(
             "temp=%.1f%s target=%.1f%s (%s) desired=%s (%s) current=%s%s",
             temperature, symbol, eff.target, symbol, eff.target_source,
-            "HEAT" if decision.desired_heating else "OFF",
+            "ON" if decision.desired_heating else "OFF",
             decision.reason,
-            "HEAT" if self._state.heating else "OFF",
+            "ON" if self._state.heating else "OFF",
             " [PAUSED]" if eff.paused else "",
         )
 
@@ -160,13 +258,15 @@ class Controller:
             return
 
         if dry_run:
+            # Dry-run must change nothing — not the Bot, not the believed state.
             _LOGGER.warning(
-                "[dry-run] Would set thermostat to %s.",
-                "HEAT" if decision.desired_heating else "OFF",
+                "[dry-run] Would set thermostat to %s (believed state left unchanged).",
+                "ON" if decision.desired_heating else "OFF",
             )
-        else:
-            await self._bot.apply(decision.desired_heating)
+            return
 
+        async with self._ble_lock:
+            await self._bot.apply(decision.desired_heating)
         self._state.heating = decision.desired_heating
         self._state.last_action_ts = now
         self._state.save(self._config.state_file)

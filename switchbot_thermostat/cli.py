@@ -262,7 +262,17 @@ async def _cmd_run(cfg) -> int:
     bot = Bot(cfg.bot)
     state = State.load(cfg.state_file)
     controller = Controller(cfg, meter, bot, state)
-    await controller.run()
+
+    tasks = [asyncio.create_task(controller.run())]
+    if cfg.web.enabled:
+        from . import web as web_module  # lazy: only needs aiohttp when enabled
+        tasks.append(asyncio.create_task(web_module.run_web(controller, cfg)))
+
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            task.cancel()
     return 0
 
 

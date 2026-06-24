@@ -182,6 +182,24 @@ class LoggingConfig:
 
 
 @dataclass
+class WebConfig:
+    enabled: bool = True
+    host: str = "0.0.0.0"  # bind address; 0.0.0.0 = reachable on the LAN
+    port: int = 8080
+    auth_token: str | None = None  # optional shared secret (for future remote access)
+
+    @classmethod
+    def from_dict(cls, d: dict | None) -> "WebConfig":
+        d = d or {}
+        return cls(
+            enabled=bool(d.get("enabled", True)),
+            host=str(d.get("host", "0.0.0.0")),
+            port=int(d.get("port", 8080)),
+            auth_token=d.get("auth_token"),
+        )
+
+
+@dataclass
 class Config:
     meter: MeterConfig
     bot: BotConfig
@@ -189,6 +207,7 @@ class Config:
     schedule: ScheduleConfig
     safety: SafetyConfig
     logging: LoggingConfig
+    web: WebConfig
     state_file: str = "state.json"
     overrides_file: str = "overrides.json"
 
@@ -203,6 +222,7 @@ class Config:
             schedule=ScheduleConfig.from_dict(d.get("schedule")),
             safety=SafetyConfig.from_dict(d.get("safety")),
             logging=LoggingConfig.from_dict(d.get("logging")),
+            web=WebConfig.from_dict(d.get("web")),
             state_file=str(d.get("state_file", "state.json")),
             overrides_file=str(d.get("overrides_file", "overrides.json")),
         )
@@ -220,4 +240,14 @@ def load_config(path: str) -> Config:
             raw = yaml.safe_load(fh)
         except yaml.YAMLError as exc:
             raise ConfigError(f"Could not parse YAML in {path}: {exc}") from exc
-    return Config.from_dict(raw or {})
+    config = Config.from_dict(raw or {})
+
+    # Resolve the runtime files relative to the config file's directory rather
+    # than the current working directory, so the daemon and CLI (which run from
+    # different CWDs) always read and write the same state/overrides files.
+    base = os.path.dirname(os.path.abspath(path))
+    if not os.path.isabs(config.state_file):
+        config.state_file = os.path.join(base, config.state_file)
+    if not os.path.isabs(config.overrides_file):
+        config.overrides_file = os.path.join(base, config.overrides_file)
+    return config

@@ -13,16 +13,20 @@ authors = [{ name = "Zack Brandes" }]
 dependencies = [
     "bleak>=0.21",
     "PyYAML>=6.0",
+    "aiohttp>=3.9",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0"]
+dev = ["pytest>=7.0", "pytest-aiohttp>=1.0"]
 
 [project.scripts]
 switchbot-thermostat = "switchbot_thermostat.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["switchbot_thermostat*"]
+
+[tool.setuptools.package-data]
+switchbot_thermostat = ["web/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

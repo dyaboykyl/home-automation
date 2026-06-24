@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#11151c">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Thermostat</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icon.svg">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main id="app">
+    <header>
+      <h1>Thermostat</h1>
+      <button id="refresh" class="icon-btn" title="Refresh" aria-label="Refresh">⟳</button>
+    </header>
+
+    <section class="card temp-card">
+      <div class="temp"><span id="temp">--</span><span id="unit" class="unit">°</span></div>
+      <div class="sub">
+        <span id="humidity">--% RH</span> ·
+        <span id="battery">--% batt</span> ·
+        <span id="age">--</span>
+      </div>
+      <div id="badges" class="badges"></div>
+    </section>
+
+    <section class="card">
+      <div class="row-label">Target</div>
+      <div class="stepper">
+        <button id="t-down" class="step">−</button>
+        <div class="target"><span id="target">--</span><span class="unit-sm">°</span></div>
+        <button id="t-up" class="step">+</button>
+      </div>
+      <div id="target-meta" class="meta">--</div>
+    </section>
+
+    <section class="card">
+      <div class="row-label">Controls</div>
+      <div class="grid">
+        <button id="pause" class="ctl">Pause</button>
+        <button id="mode" class="ctl">Mode</button>
+        <button id="out-on" class="ctl on">Turn On</button>
+        <button id="out-off" class="ctl off">Turn Off</button>
+      </div>
+      <details class="advanced">
+        <summary>Advanced</summary>
+        <p class="meta">Correct the believed state without moving the Bot (use if it has drifted):</p>
+        <div class="grid">
+          <button id="state-on" class="ctl ghost">Mark On</button>
+          <button id="state-off" class="ctl ghost">Mark Off</button>
+        </div>
+      </details>
+    </section>
+
+    <p id="msg" class="msg"></p>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -56,5 +56,13 @@ logging:
   level: INFO                  # DEBUG | INFO | WARNING | ERROR
   file: null                   # null = log to stdout (journald under systemd)
 
+# Mobile web UI, served by the `run` daemon. Browse to http://<pi-ip>:8080
+# from your phone and "Add to Home Screen" for an app-like icon.
+web:
+  enabled: true
+  host: "0.0.0.0"             # 0.0.0.0 = reachable from other devices on your LAN
+  port: 8080
+  auth_token: null            # optional shared secret; null = no auth (local network)
+
 # Where to persist believed thermostat state between runs.
 state_file: "state.json"

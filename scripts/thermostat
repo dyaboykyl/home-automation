@@ -17,6 +17,7 @@
 #   thermostat service status       # systemd service state
 #   thermostat logs                 # follow the live service log
 #   thermostat deploy               # push local code changes to the Pi + restart
+#   thermostat url                  # print the phone web-UI URL (open: on macOS)
 #   thermostat ssh                  # open a shell on the Pi
 set -euo pipefail
 
@@ -56,6 +57,14 @@ case "$cmd" in
     ;;
   ssh)
     exec ssh -t "$HOST"
+    ;;
+  url|open)
+    # Print (and on macOS, open) the phone web UI URL.
+    ip=$(ssh "$HOST" "hostname -I 2>/dev/null | awk '{print \$1}'" || true)
+    port=$(ssh "$HOST" "grep -oE 'port:[[:space:]]*[0-9]+' $DIR/config.yaml | grep -oE '[0-9]+' | head -1" 2>/dev/null || true)
+    url="http://${ip:-thermostat.local}:${port:-8080}"
+    echo "$url"
+    if [ "$cmd" = "open" ] && command -v open >/dev/null 2>&1; then open "$url"; fi
     ;;
   deploy)
     echo "Syncing local code to $HOST:$DIR ..."

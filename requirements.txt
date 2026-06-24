@@ -1,3 +1,4 @@
 # Runtime dependencies. Install with: pip install -r requirements.txt
 bleak>=0.21
 PyYAML>=6.0
+aiohttp>=3.9

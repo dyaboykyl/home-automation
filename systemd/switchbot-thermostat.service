@@ -10,7 +10,9 @@ Type=simple
 User=pi
 WorkingDirectory=/home/pi/home-automation
 ExecStart=/home/pi/home-automation/.venv/bin/switchbot-thermostat --config /home/pi/home-automation/config.yaml run
-Restart=on-failure
+# Keep the daemon (and its web UI) up no matter what: restart on any exit,
+# and across reboots (enabled via `systemctl enable`).
+Restart=always
 RestartSec=10
 # Let the daemon talk to BlueZ without running as full root.
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW

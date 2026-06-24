@@ -19,6 +19,10 @@ from .state import State
 _LOGGER = logging.getLogger(__name__)
 
 
+def _onoff(state: bool) -> str:
+    return "ON" if state else "OFF"
+
+
 @dataclass
 class Effective:
     """Config values after live overrides are applied for one evaluation."""
@@ -187,10 +191,19 @@ class Controller:
         dry_run = (
             overrides.dry_run if overrides.dry_run is not None else self._config.safety.dry_run
         )
+        old, new = _onoff(state.heating), _onoff(on)
         if on == state.heating:
+            _LOGGER.info("Manual output request (%s) ignored: already %s.", new, old)
             return {"changed": False, "reason": "already in that state", "heating": on}
         if dry_run and not force:
+            _LOGGER.info(
+                "Manual output %s -> %s skipped: dry-run is on and not forced.", old, new
+            )
             return {"changed": False, "dry_run": True, "heating": state.heating}
+        _LOGGER.info(
+            "State change %s -> %s. Trigger: MANUAL on/off (web/API)%s.",
+            old, new, " [forced past dry-run]" if dry_run and force else "",
+        )
         async with self._ble_lock:
             await self._bot.apply(on)
         state.heating = on
@@ -202,6 +215,10 @@ class Controller:
     def correct_state(self, on: bool) -> None:
         """Set the believed state without touching hardware (clears cycle timer)."""
         state = State.load(self._config.state_file)
+        _LOGGER.info(
+            "Believed state corrected %s -> %s. Trigger: MANUAL correction (no Bot press).",
+            _onoff(state.heating), _onoff(on),
+        )
         state.heating = on
         state.last_action_ts = 0.0
         state.save(self._config.state_file)
@@ -247,24 +264,32 @@ class Controller:
         if decision.desired_heating == self._state.heating:
             return  # already in the desired state
 
+        symbol = "°F" if self._config.control.unit == "fahrenheit" else "°C"
+        old, new = _onoff(self._state.heating), _onoff(decision.desired_heating)
+        # Self-contained explanation of the trigger for the logs.
+        context = (
+            f"Trigger: automatic control — {decision.reason} "
+            f"(temp={decision.temperature:.1f}{symbol}, target={decision.target:.1f}{symbol})"
+        )
+
         now = self._clock()
         elapsed = now - self._state.last_action_ts
         min_cycle = self._config.control.min_cycle_time
         if self._state.last_action_ts and elapsed < min_cycle:
             _LOGGER.info(
-                "Suppressing change for anti-short-cycle: %.0fs since last action < %.0fs.",
-                elapsed, min_cycle,
+                "State change %s -> %s SUPPRESSED (anti-short-cycle: %.0fs since last < %.0fs). %s",
+                old, new, elapsed, min_cycle, context,
             )
             return
 
         if dry_run:
             # Dry-run must change nothing — not the Bot, not the believed state.
             _LOGGER.warning(
-                "[dry-run] Would set thermostat to %s (believed state left unchanged).",
-                "ON" if decision.desired_heating else "OFF",
+                "State change %s -> %s SKIPPED (dry-run on; no Bot press). %s", old, new, context
             )
             return
 
+        _LOGGER.info("State change %s -> %s. %s", old, new, context)
         async with self._ble_lock:
             await self._bot.apply(decision.desired_heating)
         self._state.heating = decision.desired_heating

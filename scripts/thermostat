@@ -9,6 +9,7 @@
 # Examples:
 #   thermostat read                 # current temperature
 #   thermostat status               # temp, target, and what it would do
+#   thermostat health               # fast one-glance status (service + live reading)
 #   thermostat set target 22        # change target temperature (live)
 #   thermostat get target
 #   thermostat config               # show all effective settings
@@ -42,6 +43,19 @@ case "$cmd" in
     ;;
   logs)
     exec ssh -t "$HOST" "sudo journalctl -u $SERVICE -n 50 -f"
+    ;;
+  health)
+    # One-glance status: systemd state, boot time, last state change, live reading.
+    ssh "$HOST" "
+      printf 'service:   %s / %s\n' \"\$(systemctl is-active $SERVICE)\" \"\$(systemctl is-enabled $SERVICE)\"
+      printf 'booted:    %s\n' \"\$(uptime -p)\"
+      printf 'last chg:  %s\n' \"\$(journalctl -u $SERVICE -b --no-pager 2>/dev/null | grep -iE 'State change|corrected' | tail -1 | sed 's/.*controller: //')\"
+    "
+    ip=$(ssh "$HOST" "hostname -I 2>/dev/null | awk '{print \$1}'" || true)
+    port=$(ssh "$HOST" "grep -oE 'port:[[:space:]]*[0-9]+' $DIR/config.yaml | grep -oE '[0-9]+' | head -1" 2>/dev/null || true)
+    curl -s --max-time 6 "http://${ip:-thermostat.local}:${port:-8080}/api/status" \
+      | python3 -c "import sys,json; d=json.load(sys.stdin); u=d['unit'][0].upper(); print(f\"live:      {d['temperature']}{u}  target {d['target']}{u}  believed={'ON' if d['believed'] else 'OFF'}  dry_run={d['dry_run']}  paused={d['paused']}  reading {d['reading_age']}s ago\")" 2>/dev/null \
+      || echo "live:      (web API unreachable)"
     ;;
   service)
     action="${1:-status}"

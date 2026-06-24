@@ -19,7 +19,7 @@ from dataclasses import replace
 from . import __version__, ble, runtime
 from .bot import Bot
 from .config import ConfigError, load_config
-from .controller import Controller, decide_heating, effective_settings
+from .controller import Controller, build_status, decide_heating, effective_settings
 from .logging_setup import configure_logging
 from .meter import Meter
 from .runtime import Overrides
@@ -102,54 +102,89 @@ async def _cmd_scan(args) -> int:
     return 0
 
 
-async def _cmd_read(cfg) -> int:
+async def _daemon_status(cfg) -> dict | None:
+    """Fetch /api/status from the locally running daemon, or None if it's not up.
+
+    Lets `read`/`status` reuse the daemon's cached reading instead of starting a
+    competing BLE scan (the Pi has a single radio).
+    """
+    if not cfg.web.enabled:
+        return None
+    try:
+        import aiohttp
+    except ImportError:
+        return None
+    url = f"http://127.0.0.1:{cfg.web.port}/api/status"
+    headers = {"X-Auth-Token": cfg.web.auth_token} if cfg.web.auth_token else {}
+    try:
+        timeout = aiohttp.ClientTimeout(total=3)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, headers=headers) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+    except Exception:
+        return None
+    return None
+
+
+async def _get_status(cfg) -> tuple[dict | None, str]:
+    """Return (status_dict, source). Prefer the daemon; fall back to a live scan."""
+    daemon = await _daemon_status(cfg)
+    if daemon is not None and daemon.get("temperature") is not None:
+        age = daemon.get("reading_age")
+        return daemon, f"via daemon, reading {age:.0f}s ago" if age is not None else "via daemon"
     reading = await Meter(cfg.meter).read()
     if reading is None:
+        return None, ""
+    overrides = Overrides.load(cfg.overrides_file)
+    state = State.load(cfg.state_file)
+    status = build_status(cfg, overrides, state, reading, 0.0, datetime.now())
+    return status, "live BLE scan"
+
+
+def _sym(status: dict) -> str:
+    return "F" if status["unit"] == "fahrenheit" else "C"
+
+
+async def _cmd_read(cfg) -> int:
+    status, source = await _get_status(cfg)
+    if status is None:
         print("No reading: the meter did not advertise within the timeout.")
         return 1
-    unit = cfg.control.unit
-    symbol = "F" if unit == "fahrenheit" else "C"
-    print(f"Temperature: {reading.temperature(unit):.1f}{symbol}")
-    if reading.humidity is not None:
-        print(f"Humidity:    {reading.humidity}%")
-    if reading.battery is not None:
-        print(f"Battery:     {reading.battery}%")
-    if reading.rssi is not None:
-        print(f"RSSI:        {reading.rssi} dBm")
-    overrides = Overrides.load(cfg.overrides_file)
-    action = overrides.action or cfg.control.action
-    state = State.load(cfg.state_file)
-    print(f"Thermostat:  {_state_label(state.heating, action)}  (believed state)")
+    sym = _sym(status)
+    print(f"Temperature: {status['temperature']:.1f}{sym}")
+    if status.get("humidity") is not None:
+        print(f"Humidity:    {status['humidity']}%")
+    if status.get("battery") is not None:
+        print(f"Battery:     {status['battery']}%")
+    if status.get("rssi") is not None:
+        print(f"RSSI:        {status['rssi']} dBm")
+    print(f"Thermostat:  {_state_label(status['believed'], status['action'])}  (believed state)")
+    print(f"({source})")
     return 0
 
 
 async def _cmd_status(cfg) -> int:
-    state = State.load(cfg.state_file)
-    overrides = Overrides.load(cfg.overrides_file)
-    eff = effective_settings(cfg, overrides, datetime.now())
-    reading = await Meter(cfg.meter).read()
-    if reading is None:
+    status, source = await _get_status(cfg)
+    if status is None:
         print("No reading available.")
         return 1
-    unit = eff.control.unit
-    symbol = "F" if unit == "fahrenheit" else "C"
-    temperature = reading.temperature(unit)
-    decision = decide_heating(temperature, eff.target, state.heating, eff.control, cfg.safety)
-    print(f"Temperature:  {temperature:.1f}{symbol}")
-    print(f"Target:       {eff.target:.1f}{symbol}  (±{eff.control.hysteresis}{symbol} deadband, from {eff.target_source})")
-    print(f"Mode:         {eff.control.action}  (bot: {cfg.bot.mode})")
-    print(f"Believed:     {_state_label(state.heating, eff.control.action)}")
-    print(f"Desired:      {_state_label(decision.desired_heating, eff.control.action)}  ({decision.reason})")
-    if eff.dry_run:
+    sym = _sym(status)
+    print(f"Temperature:  {status['temperature']:.1f}{sym}")
+    print(f"Target:       {status['target']:.1f}{sym}  (±{status['hysteresis']}{sym} deadband, from {status['target_source']})")
+    print(f"Mode:         {status['action']}  (bot: {status['bot_mode']})")
+    print(f"Believed:     {_state_label(status['believed'], status['action'])}")
+    print(f"Desired:      {_state_label(status['desired'], status['action'])}  ({status['reason']})")
+    if status["dry_run"]:
         print("Dry-run:      ON (will not press the Bot)")
-    if eff.paused:
+    if status["paused"]:
         print("Paused:       YES (actuation suspended)")
-    if eff.paused:
         print("-> Paused: no action will be taken.")
-    elif decision.desired_heating != state.heating:
+    elif status["desired"] != status["believed"]:
         print("-> Next cycle would actuate the Bot (subject to min_cycle_time).")
     else:
         print("-> No change needed.")
+    print(f"({source})")
     return 0
 
 

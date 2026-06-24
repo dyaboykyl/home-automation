@@ -28,6 +28,9 @@ _STATIC_FILES = {
     "manifest.webmanifest": "application/manifest+json",
     "sw.js": "application/javascript",
     "icon.svg": "image/svg+xml",
+    "apple-touch-icon.png": "image/png",
+    "icon-192.png": "image/png",
+    "icon-512.png": "image/png",
 }
 
 

@@ -79,8 +79,9 @@ Every option is commented in `config.example.yaml`.
 | command   | purpose                                                       |
 |-----------|---------------------------------------------------------------|
 | `scan`    | discover nearby SwitchBot devices and their MAC addresses     |
-| `read`    | take a single temperature reading + the believed thermostat state |
-| `status`  | show current temp, target, and the decision the loop would make |
+| `read`    | temperature + believed state (uses the daemon's cached reading if running, else a live scan) |
+| `status`  | current temp, target, and the decision the loop would make (daemon-cached if running) |
+| `health`  | fast one-glance check: service state, boot time, last change, live reading |
 | `state [on\|off]` | show the believed on/off state, or correct it if it's drifted |
 | `config`  | show all effective settings (config + live overrides)         |
 | `set <key> <value>` | change a live setting (`target`, `hysteresis`, `action`, `dry-run`) |

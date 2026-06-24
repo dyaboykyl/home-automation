@@ -30,6 +30,16 @@ _LOGGER = logging.getLogger(__name__)
 DEFAULT_CONFIG = "config.yaml"
 
 
+def _verb(action: str) -> str:
+    """The conditioning word for an action: 'cooling' for cool, else 'heating'."""
+    return "cooling" if action == "cool" else "heating"
+
+
+def _state_label(on: bool, action: str) -> str:
+    """Human label for the believed actuator state, e.g. 'ON (cooling)' / 'OFF'."""
+    return f"ON ({_verb(action)})" if on else "OFF"
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="switchbot-thermostat", description=__doc__)
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -69,6 +79,13 @@ def _build_parser() -> argparse.ArgumentParser:
     sunset.add_argument("key", choices=list(runtime.SETTABLE))
     sub.add_parser("pause", help="Pause actuation (keep reading/logging, never press).")
     sub.add_parser("resume", help="Resume actuation after a pause.")
+    sstate = sub.add_parser(
+        "state", help="Show or correct the believed thermostat on/off state."
+    )
+    sstate.add_argument(
+        "value", nargs="?", choices=["on", "off"],
+        help="Set the believed state (on=heating, off); omit to just show it.",
+    )
     return parser
 
 
@@ -99,6 +116,10 @@ async def _cmd_read(cfg) -> int:
         print(f"Battery:     {reading.battery}%")
     if reading.rssi is not None:
         print(f"RSSI:        {reading.rssi} dBm")
+    overrides = Overrides.load(cfg.overrides_file)
+    action = overrides.action or cfg.control.action
+    state = State.load(cfg.state_file)
+    print(f"Thermostat:  {_state_label(state.heating, action)}  (believed state)")
     return 0
 
 
@@ -117,8 +138,8 @@ async def _cmd_status(cfg) -> int:
     print(f"Temperature:  {temperature:.1f}{symbol}")
     print(f"Target:       {eff.target:.1f}{symbol}  (±{eff.control.hysteresis}{symbol} deadband, from {eff.target_source})")
     print(f"Mode:         {eff.control.action}  (bot: {cfg.bot.mode})")
-    print(f"Believed:     {'HEATING' if state.heating else 'OFF'}")
-    print(f"Desired:      {'HEATING' if decision.desired_heating else 'OFF'}  ({decision.reason})")
+    print(f"Believed:     {_state_label(state.heating, eff.control.action)}")
+    print(f"Desired:      {_state_label(decision.desired_heating, eff.control.action)}  ({decision.reason})")
     if eff.dry_run:
         print("Dry-run:      ON (will not press the Bot)")
     if eff.paused:
@@ -194,6 +215,25 @@ def _cmd_pause(cfg, paused: bool) -> int:
     return 0
 
 
+def _cmd_state(cfg, value: str | None) -> int:
+    overrides = Overrides.load(cfg.overrides_file)
+    action = overrides.action or cfg.control.action
+    state = State.load(cfg.state_file)
+    if value is None:
+        print(f"Believed thermostat state: {_state_label(state.heating, action)}")
+        return 0
+    state.heating = value == "on"
+    # A manual correction is not a Bot press, so clear the short-cycle timer:
+    # the controller should be free to actuate on the next cycle if needed.
+    state.last_action_ts = 0.0
+    state.save(cfg.state_file)
+    print(
+        f"Set believed thermostat state to {_state_label(state.heating, action)}. "
+        "The controller will act on this at the next cycle."
+    )
+    return 0
+
+
 async def _cmd_bot(cfg, command: str, force: bool = False, timeout: float = 12.0) -> int:
     # Manual commands fail fast: a single attempt with a short timeout, so the
     # user isn't left waiting through the control loop's retry/backoff sequence.
@@ -252,6 +292,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_unset(cfg, args.key)
     if args.command in ("pause", "resume"):
         return _cmd_pause(cfg, args.command == "pause")
+    if args.command == "state":
+        return _cmd_state(cfg, args.value)
 
     try:
         if args.command == "run":

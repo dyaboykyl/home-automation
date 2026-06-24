@@ -79,8 +79,9 @@ Every option is commented in `config.example.yaml`.
 | command   | purpose                                                       |
 |-----------|---------------------------------------------------------------|
 | `scan`    | discover nearby SwitchBot devices and their MAC addresses     |
-| `read`    | take a single temperature reading                             |
+| `read`    | take a single temperature reading + the believed thermostat state |
 | `status`  | show current temp, target, and the decision the loop would make |
+| `state [on\|off]` | show the believed on/off state, or correct it if it's drifted |
 | `config`  | show all effective settings (config + live overrides)         |
 | `set <key> <value>` | change a live setting (`target`, `hysteresis`, `action`, `dry-run`) |
 | `get <key>` / `unset <key>` | read / clear a live override               |

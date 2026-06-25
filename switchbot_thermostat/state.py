@@ -18,10 +18,13 @@ class State:
     ``heating`` is the believed on/off state we last drove the Bot to.
     ``last_action_ts`` is the wall-clock epoch of the last actuation, used to
     enforce the anti-short-cycle minimum cycle time across restarts.
+    ``off_timer_at`` is the wall-clock epoch at which a pending auto-off timer
+    should turn the thermostat off (0 = no timer); it survives restarts.
     """
 
     heating: bool = False
     last_action_ts: float = 0.0
+    off_timer_at: float = 0.0
 
     @classmethod
     def load(cls, path: str) -> "State":
@@ -33,6 +36,7 @@ class State:
             return cls(
                 heating=bool(data.get("heating", False)),
                 last_action_ts=float(data.get("last_action_ts", 0.0)),
+                off_timer_at=float(data.get("off_timer_at", 0.0)),
             )
         except (OSError, ValueError, TypeError) as exc:
             _LOGGER.warning("Could not read state file %s (%s); starting fresh.", path, exc)

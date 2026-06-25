@@ -6,7 +6,9 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
+
+TIMER_CHECK_INTERVAL = 15  # seconds between auto-off timer checks
 
 from .bot import Bot
 from .config import Config, ControlConfig, SafetyConfig
@@ -21,6 +23,14 @@ _LOGGER = logging.getLogger(__name__)
 
 def _onoff(state: bool) -> str:
     return "ON" if state else "OFF"
+
+
+def off_at_epoch(now_dt: datetime, hour: int, minute: int) -> float:
+    """Epoch seconds for the next occurrence of ``hour:minute`` (today or tomorrow)."""
+    target = now_dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now_dt:
+        target += timedelta(days=1)
+    return target.timestamp()
 
 
 @dataclass
@@ -133,6 +143,10 @@ def build_status(
         "paused": eff.paused,
         "bot_mode": config.bot.mode,
         "min_cycle_time": config.control.min_cycle_time,
+        "off_timer_at": state.off_timer_at or None,
+        "timer_remaining_s": (
+            max(0, round(state.off_timer_at - now.timestamp())) if state.off_timer_at else None
+        ),
     }
 
 
@@ -208,6 +222,8 @@ class Controller:
             await self._bot.apply(on)
         state.heating = on
         state.last_action_ts = self._clock()
+        if not on:
+            state.off_timer_at = 0.0  # turning off fulfils/cancels any auto-off timer
         state.save(self._config.state_file)
         self._state = state
         return {"changed": True, "heating": on}
@@ -221,8 +237,67 @@ class Controller:
         )
         state.heating = on
         state.last_action_ts = 0.0
+        if not on:
+            state.off_timer_at = 0.0
         state.save(self._config.state_file)
         self._state = state
+
+    # -- auto-off timer ---------------------------------------------------- #
+    def set_timer_in(self, minutes: float) -> float:
+        """Schedule an auto-off ``minutes`` from now. Returns the target epoch."""
+        return self._set_timer(self._clock() + minutes * 60)
+
+    def set_timer_at(self, hour: int, minute: int) -> float:
+        """Schedule an auto-off at the next occurrence of ``hour:minute`` (local)."""
+        return self._set_timer(off_at_epoch(self._now_fn(), hour, minute))
+
+    def _set_timer(self, epoch: float) -> float:
+        state = State.load(self._config.state_file)
+        state.off_timer_at = epoch
+        state.save(self._config.state_file)
+        self._state = state
+        _LOGGER.info(
+            "Auto-off timer set for %s.", datetime.fromtimestamp(epoch).strftime("%Y-%m-%d %H:%M")
+        )
+        return epoch
+
+    def clear_timer(self) -> None:
+        state = State.load(self._config.state_file)
+        if state.off_timer_at:
+            _LOGGER.info("Auto-off timer cancelled.")
+        state.off_timer_at = 0.0
+        state.save(self._config.state_file)
+        self._state = state
+
+    async def check_timer(self) -> None:
+        """Turn the thermostat off if a pending auto-off timer has elapsed."""
+        state = State.load(self._config.state_file)
+        if not state.off_timer_at or self._clock() < state.off_timer_at:
+            return
+        _LOGGER.info(
+            "State change %s -> OFF. Trigger: auto-off timer (scheduled for %s).",
+            _onoff(state.heating),
+            datetime.fromtimestamp(state.off_timer_at).strftime("%H:%M"),
+        )
+        if state.heating:
+            async with self._ble_lock:
+                await self._bot.apply(False)
+        state.heating = False
+        state.off_timer_at = 0.0
+        state.last_action_ts = self._clock()
+        state.save(self._config.state_file)
+        self._state = state
+
+    async def run_timer(self) -> None:
+        """Background loop that fires the auto-off timer when it elapses."""
+        while True:
+            try:
+                await self.check_timer()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _LOGGER.exception("Error checking auto-off timer.")
+            await asyncio.sleep(TIMER_CHECK_INTERVAL)
 
     # -- control loop ------------------------------------------------------ #
     async def tick(self) -> Decision | None:

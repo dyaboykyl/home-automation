@@ -72,6 +72,25 @@ h1 { font-size: 20px; font-weight: 600; margin: 0; }
 .advanced { margin-top: 14px; }
 .advanced summary { color: var(--muted); font-size: 13px; cursor: pointer; }
 
+.badge.timer { background: rgba(70,201,139,0.16); color: var(--good); }
+
+/* Auto-off timer */
+.chips { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.chip {
+  padding: 12px 0; border-radius: 12px; border: none; cursor: pointer;
+  background: var(--card-2); color: var(--text); font-size: 15px; font-weight: 600;
+}
+.chip:active { background: var(--accent); }
+.at-row { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+.at-row .meta { margin: 0; white-space: nowrap; }
+input[type="time"] {
+  flex: 1; background: var(--card-2); color: var(--text); border: none;
+  border-radius: 10px; padding: 10px; font-size: 15px; font-family: inherit;
+}
+.ctl.small { padding: 10px 16px; }
+.timer-when { font-size: 16px; font-weight: 600; }
+.timer-remaining { color: var(--good); font-size: 26px; font-weight: 700; margin: 6px 0 14px; }
+
 .msg { text-align: center; color: var(--muted); font-size: 13px; min-height: 18px; }
 .msg.error { color: var(--danger); }
 .msg.ok { color: var(--good); }

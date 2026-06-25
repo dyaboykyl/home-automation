@@ -57,6 +57,28 @@
       </details>
     </section>
 
+    <section class="card" id="timer-card" hidden>
+      <div class="row-label">Auto-off timer</div>
+      <div id="timer-idle">
+        <div class="chips">
+          <button class="chip" data-min="30">30m</button>
+          <button class="chip" data-min="60">1h</button>
+          <button class="chip" data-min="120">2h</button>
+          <button class="chip" data-min="240">4h</button>
+        </div>
+        <div class="at-row">
+          <span class="meta">or turn off at</span>
+          <input type="time" id="timer-time" aria-label="Auto-off time">
+          <button id="timer-at-set" class="ctl small">Set</button>
+        </div>
+      </div>
+      <div id="timer-active" hidden>
+        <div class="timer-when">⏱ Turns off at <span id="timer-when"></span></div>
+        <div class="timer-remaining" id="timer-remaining"></div>
+        <button id="timer-cancel" class="ctl ghost">Cancel timer</button>
+      </div>
+    </section>
+
     <p id="msg" class="msg"></p>
   </main>
   <script src="/app.js"></script>

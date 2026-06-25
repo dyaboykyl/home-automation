@@ -91,6 +91,25 @@ def create_app(controller: Controller, config: Config) -> web.Application:
         controller.correct_state(bool(data["on"]))
         return web.json_response(controller.get_status())
 
+    async def set_timer(request: web.Request) -> web.Response:
+        data = await request.json()
+        try:
+            if data.get("clear"):
+                controller.clear_timer()
+            elif "minutes" in data:
+                minutes = float(data["minutes"])
+                if minutes <= 0:
+                    raise ValueError("minutes must be positive")
+                controller.set_timer_in(minutes)
+            elif "at" in data:
+                hour, minute = (int(x) for x in str(data["at"]).split(":"))
+                controller.set_timer_at(hour, minute)
+            else:
+                return web.json_response({"error": "specify minutes, at, or clear"}, status=400)
+        except (ValueError, TypeError) as exc:
+            return web.json_response({"error": f"invalid timer: {exc}"}, status=400)
+        return web.json_response(controller.get_status())
+
     app.router.add_get("/api/status", status)
     app.router.add_post("/api/refresh", refresh)
     app.router.add_post("/api/target", set_target)
@@ -98,6 +117,7 @@ def create_app(controller: Controller, config: Config) -> web.Application:
     app.router.add_post("/api/pause", set_pause)
     app.router.add_post("/api/output", set_output)
     app.router.add_post("/api/state", correct_state)
+    app.router.add_post("/api/timer", set_timer)
 
     async def index(request: web.Request) -> web.Response:
         return web.FileResponse(STATIC_DIR / "index.html")

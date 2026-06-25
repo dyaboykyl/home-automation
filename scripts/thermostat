@@ -28,7 +28,7 @@ SERVICE="switchbot-thermostat.service"
 BIN="$DIR/.venv/bin/switchbot-thermostat -c $DIR/config.yaml"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"  # local repo root
 
-PASSTHROUGH="read status scan press on off config set get unset pause resume state"
+PASSTHROUGH="read status scan press on off config set get unset pause resume state timer"
 
 usage() {
   sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'

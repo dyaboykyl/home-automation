@@ -31,6 +31,20 @@ function fmtAge(seconds) {
   return `${Math.round(seconds / 60)}m ago`;
 }
 
+function fmtClock(epochSeconds) {
+  return new Date(epochSeconds * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+function fmtDuration(seconds) {
+  if (seconds <= 0) return "now";
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
 function render(s) {
   current = s;
   const sym = s.unit === "fahrenheit" ? "F" : "C";
@@ -53,6 +67,7 @@ function render(s) {
   badges.push(`<span class="badge mode">${s.action}</span>`);
   badges.push(`<span class="badge ${s.paused ? "paused" : ""}">${s.paused ? "Paused" : "Auto"}</span>`);
   if (s.dry_run) badges.push(`<span class="badge dry">dry-run</span>`);
+  if (s.off_timer_at) badges.push(`<span class="badge timer" id="badge-timer"></span>`);
   $("badges").innerHTML = badges.join("");
 
   // Control states
@@ -61,6 +76,27 @@ function render(s) {
   $("mode").textContent = s.action === "cool" ? "Mode: Cool" : "Mode: Heat";
   $("out-on").classList.toggle("active", s.believed === true);
   $("out-off").classList.toggle("active", s.believed === false);
+
+  // Auto-off timer card: only relevant while the thermostat is on.
+  const timerCard = $("timer-card");
+  timerCard.hidden = !s.believed;
+  const active = !!s.off_timer_at;
+  $("timer-idle").hidden = active;
+  $("timer-active").hidden = !active;
+  if (active) $("timer-when").textContent = fmtClock(s.off_timer_at);
+  tickTimer(); // refresh countdown immediately
+}
+
+// Live countdown, recomputed from the absolute off time each second.
+function tickTimer() {
+  if (!current || !current.off_timer_at) return;
+  const remaining = Math.round(current.off_timer_at - Date.now() / 1000);
+  const text = remaining <= 0 ? "turning off…" : `in ${fmtDuration(remaining)}`;
+  const el = $("timer-remaining");
+  if (el) el.textContent = text;
+  const badge = $("badge-timer");
+  if (badge) badge.textContent = remaining <= 0 ? "⏱ off" : `⏱ ${fmtDuration(remaining)}`;
+  if (remaining <= 0) load(); // the daemon should have just turned it off; refresh
 }
 
 function msg(text, kind = "") {
@@ -118,6 +154,19 @@ $("state-on").addEventListener("click", () =>
 $("state-off").addEventListener("click", () =>
   act(() => api("/api/state", "POST", { on: false }), "Marked OFF"));
 
+// Auto-off timer
+document.querySelectorAll(".chip[data-min]").forEach((btn) =>
+  btn.addEventListener("click", () =>
+    act(() => api("/api/timer", "POST", { minutes: Number(btn.dataset.min) }),
+      `Auto-off in ${btn.textContent}`)));
+$("timer-at-set").addEventListener("click", () => {
+  const t = $("timer-time").value; // "HH:MM"
+  if (!t) { msg("Pick a time first.", "error"); return; }
+  act(() => api("/api/timer", "POST", { at: t }), `Auto-off at ${t}`);
+});
+$("timer-cancel").addEventListener("click", () =>
+  act(() => api("/api/timer", "POST", { clear: true }), "Timer cancelled"));
+
 // --- service worker (best-effort; only works over https/localhost) ---
 if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("/sw.js").catch(() => {});
@@ -125,3 +174,4 @@ if ("serviceWorker" in navigator) {
 
 load();
 setInterval(load, POLL_MS);
+setInterval(tickTimer, 1000); // smooth per-second countdown between polls

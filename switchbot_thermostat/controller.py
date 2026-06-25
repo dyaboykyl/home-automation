@@ -147,6 +147,11 @@ def build_status(
         "timer_remaining_s": (
             max(0, round(state.off_timer_at - now.timestamp())) if state.off_timer_at else None
         ),
+        # Seconds until a manual turn-ON is allowed again (compressor protection); 0 = now.
+        "on_locked_s": (
+            max(0, round(config.control.min_cycle_time - (now.timestamp() - state.last_action_ts)))
+            if state.last_action_ts else 0
+        ),
     }
 
 
@@ -209,6 +214,21 @@ class Controller:
         if on == state.heating:
             _LOGGER.info("Manual output request (%s) ignored: already %s.", new, old)
             return {"changed": False, "reason": "already in that state", "heating": on}
+        # Compressor protection: never let the unit be switched ON again too soon
+        # after the last change. Turning OFF is always allowed (stopping is safe).
+        now = self._clock()
+        elapsed = now - state.last_action_ts
+        min_cycle = self._config.control.min_cycle_time
+        if on and state.last_action_ts and elapsed < min_cycle:
+            retry = round(min_cycle - elapsed)
+            _LOGGER.info(
+                "Manual turn-ON blocked: only %.0fs since last change (< %.0fs). "
+                "Compressor protection; retry in %ds.", elapsed, min_cycle, retry,
+            )
+            return {
+                "changed": False, "blocked": True, "retry_after_s": retry,
+                "heating": state.heating,
+            }
         if dry_run and not force:
             _LOGGER.info(
                 "Manual output %s -> %s skipped: dry-run is on and not forced.", old, new
@@ -221,7 +241,7 @@ class Controller:
         async with self._ble_lock:
             await self._bot.apply(on)
         state.heating = on
-        state.last_action_ts = self._clock()
+        state.last_action_ts = now
         if not on:
             state.off_timer_at = 0.0  # turning off fulfils/cancels any auto-off timer
         state.save(self._config.state_file)

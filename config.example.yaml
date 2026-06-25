@@ -4,7 +4,8 @@
 
 meter:
   mac: "AA:BB:CC:DD:EE:FF"     # SwitchBot Meter BLE address
-  scan_timeout: 30             # seconds to wait for an advertisement
+  scan_timeout: 30             # seconds to wait for an advertisement (a weak/distant
+                               # meter needs a longer window to catch a broadcast)
   temperature_offset: 0.0      # calibration offset added to the raw reading (°C)
   max_reading_age: 300         # ignore readings older than this many seconds
 

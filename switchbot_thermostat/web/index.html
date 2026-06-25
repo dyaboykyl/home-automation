@@ -16,6 +16,7 @@
   <main id="app">
     <header>
       <h1>Thermostat</h1>
+      <span id="conn" class="conn"><span class="dot"></span><span id="conn-text">connecting…</span></span>
       <button id="refresh" class="icon-btn" title="Refresh" aria-label="Refresh">⟳</button>
     </header>
 
@@ -26,6 +27,7 @@
         <span id="battery">--% batt</span> ·
         <span id="age">--</span>
       </div>
+      <div id="temp-note" class="temp-note" hidden></div>
       <div id="badges" class="badges"></div>
     </section>
 
@@ -41,11 +43,11 @@
 
     <section class="card">
       <div class="row-label">Controls</div>
+      <button id="toggle" class="ctl toggle">Turn On</button>
+      <p class="lock-note" id="lock-note"></p>
       <div class="grid">
         <button id="pause" class="ctl">Pause</button>
         <button id="mode" class="ctl">Mode</button>
-        <button id="out-on" class="ctl on">Turn On</button>
-        <button id="out-off" class="ctl off">Turn Off</button>
       </div>
       <details class="advanced">
         <summary>Advanced</summary>
@@ -80,6 +82,7 @@
     </section>
 
     <p id="msg" class="msg"></p>
+    <div id="diag" class="diag"></div>
   </main>
   <script src="/app.js"></script>
 </body>

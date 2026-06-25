@@ -119,14 +119,20 @@ def create_app(controller: Controller, config: Config) -> web.Application:
     app.router.add_post("/api/state", correct_state)
     app.router.add_post("/api/timer", set_timer)
 
+    # Always revalidate the app shell so a redeploy is picked up immediately
+    # (FileResponse adds ETag/Last-Modified, so unchanged files still 304).
+    no_cache = {"Cache-Control": "no-cache"}
+
     async def index(request: web.Request) -> web.Response:
-        return web.FileResponse(STATIC_DIR / "index.html")
+        return web.FileResponse(STATIC_DIR / "index.html", headers=dict(no_cache))
 
     app.router.add_get("/", index)
     for fname, content_type in _STATIC_FILES.items():
         def _make(name: str, ctype: str):
             async def _serve(request: web.Request) -> web.Response:
-                return web.FileResponse(STATIC_DIR / name, headers={"Content-Type": ctype})
+                return web.FileResponse(
+                    STATIC_DIR / name, headers={"Content-Type": ctype, **no_cache}
+                )
             return _serve
         app.router.add_get(f"/{fname}", _make(fname, content_type))
 

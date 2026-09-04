@@ -1,0 +1,13 @@
+[Unit]
+Description=Periodic snapshot of network configuration
+
+[Timer]
+# Once shortly after boot (by which time a good config has proved itself), then
+# daily. The NetworkManager dispatcher hook also fires this on every successful
+# connection, so a config change is captured within seconds.
+OnBootSec=10min
+OnUnitActiveSec=1d
+Persistent=true
+
+[Install]
+WantedBy=timers.target

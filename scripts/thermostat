@@ -20,9 +20,41 @@
 #   thermostat deploy               # push local code changes to the Pi + restart
 #   thermostat url                  # print the phone web-UI URL (open: on macOS)
 #   thermostat ssh                  # open a shell on the Pi
+#   thermostat wifi <ssid>          # set the Pi's Wi-Fi credentials (prompts; never echoed)
+#   thermostat netstatus            # network resilience: guard, watchdog, addresses
+#   thermostat harden               # (re)install the network self-healing layers
+#   thermostat where                # show which address the Pi answered on
 set -euo pipefail
 
-HOST="${THERMOSTAT_HOST:-thermostat}"
+# Reaching the Pi must not depend on any single mechanism. A power cut once
+# truncated its Wi-Fi profile and mDNS stopped answering, which made a perfectly
+# healthy Pi look dead. Try the SSH alias first, then mDNS, then the static
+# fallback addresses that scripts/harden-network.sh pins on the Pi -- those work
+# with no DHCP server and no mDNS at all.
+FALLBACK_IPS="${THERMOSTAT_FALLBACK_IPS:-192.168.1.250 192.168.1.251}"
+PI_KEY="${THERMOSTAT_KEY:-$HOME/.ssh/pi_thermostat}"
+SSH_OPTS=""
+
+probe() { nc -z -G "${2:-2}" "$1" 22 >/dev/null 2>&1; }
+
+# Sets HOST, SSH_OPTS and VIA in place -- deliberately not via $(...), because a
+# command substitution subshell would discard the SSH_OPTS assignment.
+HOST="thermostat"; VIA="ssh alias"
+resolve_host() {
+  if [ -n "${THERMOSTAT_HOST:-}" ]; then HOST="$THERMOSTAT_HOST"; VIA="THERMOSTAT_HOST"; return 0; fi
+  if probe thermostat.local 2; then HOST="thermostat"; VIA="mDNS (thermostat.local)"; return 0; fi
+  local ip
+  for ip in $FALLBACK_IPS; do
+    if probe "$ip" 2; then
+      # An IP bypasses the ~/.ssh/config alias, so carry the identity explicitly.
+      SSH_OPTS="-i $PI_KEY -o User=pi -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+      HOST="$ip"; VIA="static fallback address"
+      echo "note: mDNS did not answer; reached the Pi at $ip" >&2
+      return 0
+    fi
+  done
+  HOST="thermostat"; VIA="unreachable"; return 1
+}
 DIR="${THERMOSTAT_DIR:-\$HOME/home-automation}"   # remote dir; \$HOME expands on the Pi
 SERVICE="switchbot-thermostat.service"
 BIN="$DIR/.venv/bin/switchbot-thermostat -c $DIR/config.yaml"
@@ -31,65 +63,122 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"  # local repo root
 PASSTHROUGH="read status scan press on off config set get unset pause resume state timer"
 
 usage() {
-  sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  awk 'NR>1 && /^#/ { sub(/^# ?/, ""); print; next } NR>1 { exit }' "${BASH_SOURCE[0]}"
   exit "${1:-0}"
 }
 
 cmd="${1:-}"; [ $# -gt 0 ] && shift || true
 
+case "$cmd" in ""|-h|--help|help) usage 0 ;; esac
+resolve_host || true
+
 case "$cmd" in
-  ""|-h|--help|help)
-    usage 0
-    ;;
   logs)
-    exec ssh -t "$HOST" "sudo journalctl -u $SERVICE -n 50 -f"
+    exec ssh $SSH_OPTS -t "$HOST" "sudo journalctl -u $SERVICE -n 50 -f"
     ;;
   health)
     # One-glance status: systemd state, boot time, last state change, live reading.
-    ssh "$HOST" "
+    ssh $SSH_OPTS "$HOST" "
       printf 'service:   %s / %s\n' \"\$(systemctl is-active $SERVICE)\" \"\$(systemctl is-enabled $SERVICE)\"
       printf 'booted:    %s\n' \"\$(uptime -p)\"
       printf 'last chg:  %s\n' \"\$(journalctl -u $SERVICE -b --no-pager 2>/dev/null | grep -iE 'State change|corrected' | tail -1 | sed 's/.*controller: //')\"
     "
-    ip=$(ssh "$HOST" "hostname -I 2>/dev/null | awk '{print \$1}'" || true)
-    port=$(ssh "$HOST" "grep -oE 'port:[[:space:]]*[0-9]+' $DIR/config.yaml | grep -oE '[0-9]+' | head -1" 2>/dev/null || true)
-    curl -s --max-time 6 "http://${ip:-thermostat.local}:${port:-8080}/api/status" \
+    ip=$(ssh $SSH_OPTS "$HOST" "hostname -I 2>/dev/null | awk '{print \$1}'" || true)
+    port=$(ssh $SSH_OPTS "$HOST" "grep -oE 'port:[[:space:]]*[0-9]+' $DIR/config.yaml | grep -oE '[0-9]+' | head -1" 2>/dev/null || true)
+    curl -s --max-time 6 "http://${ip:-$HOST}:${port:-8080}/api/status" \
       | python3 -c "import sys,json; d=json.load(sys.stdin); u=d['unit'][0].upper(); print(f\"live:      {d['temperature']}{u}  target {d['target']}{u}  believed={'ON' if d['believed'] else 'OFF'}  dry_run={d['dry_run']}  paused={d['paused']}  reading {d['reading_age']}s ago\")" 2>/dev/null \
       || echo "live:      (web API unreachable)"
     ;;
   service)
     action="${1:-status}"
     case "$action" in
-      status) exec ssh -t "$HOST" "systemctl status $SERVICE --no-pager" ;;
+      status) exec ssh $SSH_OPTS -t "$HOST" "systemctl status $SERVICE --no-pager" ;;
       start|stop|restart|enable|disable)
-        exec ssh -t "$HOST" "sudo systemctl $action $SERVICE && systemctl is-active $SERVICE || true" ;;
+        exec ssh $SSH_OPTS -t "$HOST" "sudo systemctl $action $SERVICE && systemctl is-active $SERVICE || true" ;;
       *) echo "Unknown service action: $action" >&2; exit 2 ;;
     esac
     ;;
   enable-service)   # convenience: enable + start at boot
-    exec ssh -t "$HOST" "sudo systemctl enable --now $SERVICE"
+    exec ssh $SSH_OPTS -t "$HOST" "sudo systemctl enable --now $SERVICE"
     ;;
   ssh)
-    exec ssh -t "$HOST"
+    exec ssh $SSH_OPTS -t "$HOST"
     ;;
   url|open)
     # Print (and on macOS, open) the phone web UI URL.
-    ip=$(ssh "$HOST" "hostname -I 2>/dev/null | awk '{print \$1}'" || true)
-    port=$(ssh "$HOST" "grep -oE 'port:[[:space:]]*[0-9]+' $DIR/config.yaml | grep -oE '[0-9]+' | head -1" 2>/dev/null || true)
-    url="http://${ip:-thermostat.local}:${port:-8080}"
+    ip=$(ssh $SSH_OPTS "$HOST" "hostname -I 2>/dev/null | awk '{print \$1}'" || true)
+    port=$(ssh $SSH_OPTS "$HOST" "grep -oE 'port:[[:space:]]*[0-9]+' $DIR/config.yaml | grep -oE '[0-9]+' | head -1" 2>/dev/null || true)
+    url="http://${ip:-$HOST}:${port:-8080}"
     echo "$url"
     if [ "$cmd" = "open" ] && command -v open >/dev/null 2>&1; then open "$url"; fi
     ;;
+  where)
+    echo "host:  $HOST"
+    echo "via:   $VIA"
+    [ -n "$SSH_OPTS" ] && echo "opts:  $SSH_OPTS"
+    ssh $SSH_OPTS "$HOST" "echo 'addrs: '\$(hostname -I)" 2>/dev/null || echo "addrs: (unreachable)"
+    ;;
+  netstatus)
+    exec ssh $SSH_OPTS "$HOST" "
+      echo '--- config guard ---'
+      sudo /usr/local/sbin/netconfig-guard status
+      echo
+      echo '--- self-healing units ---'
+      systemctl is-enabled netconfig-guard-restore.service net-watchdog.timer netconfig-guard-backup.timer 2>&1 | paste -d' ' - <(echo 'restore watchdog backup' | tr ' ' '\n') || true
+      echo
+      echo '--- addresses ---'
+      ip -br a | grep -v '^lo'
+      echo
+      echo '--- hardware watchdog ---'
+      systemctl show -p RuntimeWatchdogUSec --value
+    "
+    ;;
+  harden)
+    echo "Re-installing network hardening on $HOST ..."
+    exec ssh $SSH_OPTS -t "$HOST" "sudo bash $DIR/scripts/harden-network.sh"
+    ;;
+  wifi)
+    ssid="${1:-}"
+    [ -n "$ssid" ] || { echo "usage: thermostat wifi <ssid>" >&2; exit 2; }
+    printf 'Wi-Fi password for %s: ' "$ssid" >&2
+    read -rs psk; echo >&2
+    [ -n "$psk" ] || { echo "No password entered; nothing changed." >&2; exit 2; }
+    # The secret travels on stdin and is written with tee on the Pi, so it never
+    # appears in argv (visible via ps), in shell history, or in any log.
+    REMOTE='
+set -euo pipefail
+read -r SSID
+read -r PSK
+f="/etc/NetworkManager/system-connections/${SSID}.nmconnection"
+printf "%s\n" \
+  "[connection]" "id=${SSID}" "type=wifi" "interface-name=wlan0" \
+  "autoconnect=true" "autoconnect-retries=0" \
+  "" "[wifi]" "mode=infrastructure" "ssid=${SSID}" \
+  "" "[wifi-security]" "key-mgmt=wpa-psk" "psk=${PSK}" \
+  "" "[ipv4]" "method=auto" \
+  "" "[ipv6]" "method=auto" | sudo tee "$f" >/dev/null
+sudo chown root:root "$f"; sudo chmod 600 "$f"
+sudo nmcli connection reload
+sudo nmcli connection up "${SSID}" >/dev/null 2>&1 || echo "(could not activate yet -- check the password or signal)"
+sudo /usr/local/sbin/netconfig-guard backup >/dev/null 2>&1 || true
+nmcli -f DEVICE,STATE,CONNECTION device status | grep -E "^(DEVICE|wlan0)"
+'
+    printf '%s\n%s\n' "$ssid" "$psk" | ssh $SSH_OPTS "$HOST" "$REMOTE"
+    unset psk
+    echo "Pinning the Wi-Fi fallback address and snapshotting the new profile..."
+    ssh $SSH_OPTS -t "$HOST" "sudo bash $DIR/scripts/harden-network.sh" >/dev/null 2>&1 || true
+    echo "Done."
+    ;;
   deploy)
     echo "Syncing local code to $HOST:$DIR ..."
-    rsync -az --delete \
+    rsync -az --delete -e "ssh $SSH_OPTS" \
       --exclude '.venv' --exclude '.git' --exclude '__pycache__' \
       --exclude '.pytest_cache' --exclude '*.egg-info' \
       --exclude 'config.yaml' --exclude 'state.json' --exclude 'overrides.json' \
       "$SCRIPT_DIR/" "$HOST:$DIR/"
     # The package is installed editable, so synced source is picked up directly —
     # no wheel rebuild needed. Only restart if the service is already running.
-    ssh "$HOST" "if systemctl is-active --quiet $SERVICE; then sudo systemctl restart $SERVICE && echo 'service restarted'; \
+    ssh $SSH_OPTS "$HOST" "if systemctl is-active --quiet $SERVICE; then sudo systemctl restart $SERVICE && echo 'service restarted'; \
       else echo 'service not running (not started)'; fi"
     echo "Done."
     ;;
@@ -97,7 +186,7 @@ case "$cmd" in
     # Pass everything else straight to the on-Pi CLI.
     for p in $PASSTHROUGH; do
       if [ "$cmd" = "$p" ]; then
-        exec ssh "$HOST" "$BIN $cmd $*"
+        exec ssh $SSH_OPTS "$HOST" "$BIN $cmd $*"
       fi
     done
     echo "Unknown command: $cmd" >&2

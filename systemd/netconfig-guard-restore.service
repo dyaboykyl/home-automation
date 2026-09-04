@@ -1,0 +1,21 @@
+[Unit]
+Description=Restore network configuration lost to an unclean shutdown
+Documentation=man:netconfig-guard(8)
+# Must land before NetworkManager reads its profiles, or the recovery is a
+# boot too late. netplan's own generator has already run by this point, which
+# is why the script re-runs `netplan generate` when it restores a netplan file.
+After=local-fs.target
+Before=NetworkManager.service network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/netconfig-guard restore
+# Never let a failure here block the boot — a Pi that boots without Wi-Fi is
+# still reachable over Ethernet; one that refuses to boot is not reachable at all.
+SuccessExitStatus=0 1
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target

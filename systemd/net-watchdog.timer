@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodic network connectivity check
+
+[Timer]
+# First check 5 minutes in, giving DHCP and Wi-Fi association time to settle,
+# then every 5 minutes. Four consecutive failures (~20 min) triggers a reboot.
+OnBootSec=5min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

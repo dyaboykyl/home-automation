@@ -1,0 +1,9 @@
+[Unit]
+Description=Snapshot network configuration so it can be recovered
+Documentation=man:netconfig-guard(8)
+After=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/netconfig-guard backup
+TimeoutStartSec=120

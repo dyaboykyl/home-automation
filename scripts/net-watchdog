@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+#
+# net-watchdog — notice when the Pi has fallen off the network and claw it back.
+#
+# Runs on a timer. If the Pi cannot reach its gateway, it escalates through
+# progressively bigger hammers, one step per run, and only reboots as a last
+# resort. Any successful check resets the ladder.
+#
+#   1. restore lost config + bounce NetworkManager's radio state
+#   2. restart NetworkManager
+#   3. unblock rfkill, force interfaces up, re-activate every saved connection
+#   4. reboot (rate-limited to once an hour, never within 10 min of boot)
+#
+# The point is that nobody should ever again have to walk over with a keyboard
+# because a config file got truncated.
+
+set -uo pipefail
+
+STATE_DIR=/var/lib/netguard
+FAIL_FILE="$STATE_DIR/failcount"
+REBOOT_FILE="$STATE_DIR/last-reboot"
+TAG=net-watchdog
+REBOOT_AFTER=4          # consecutive failures before rebooting
+REBOOT_COOLDOWN=3600    # seconds between watchdog-initiated reboots
+MIN_UPTIME=600          # never reboot within this many seconds of booting
+
+mkdir -p "$STATE_DIR"
+log() { logger -t "$TAG" -- "$*" 2>/dev/null || true; echo "$TAG: $*"; }
+
+uptime_secs() { awk '{print int($1)}' /proc/uptime; }
+
+healthy() {
+  # A default route we can actually reach is the only definition that matters.
+  local gw
+  gw=$(ip route show default 2>/dev/null | awk '/default/{print $3; exit}')
+  [ -n "$gw" ] || return 1
+  ping -c 1 -W 3 "$gw" >/dev/null 2>&1
+}
+
+reactivate_all() {
+  local uuid
+  nmcli -t -f UUID,AUTOCONNECT connection show 2>/dev/null \
+    | awk -F: '$2=="yes"{print $1}' \
+    | while read -r uuid; do
+        [ -n "$uuid" ] && nmcli connection up uuid "$uuid" >/dev/null 2>&1 || true
+      done
+}
+
+if healthy; then
+  if [ -f "$FAIL_FILE" ] && [ "$(cat "$FAIL_FILE" 2>/dev/null || echo 0)" -gt 0 ]; then
+    log "connectivity restored — resetting escalation"
+  fi
+  echo 0 > "$FAIL_FILE"
+  exit 0
+fi
+
+fails=$(( $(cat "$FAIL_FILE" 2>/dev/null || echo 0) + 1 ))
+echo "$fails" > "$FAIL_FILE"
+log "no route to gateway (consecutive failures: $fails)"
+
+case "$fails" in
+  1)
+    log "step 1: restoring any lost network config and bouncing networking"
+    /usr/local/sbin/netconfig-guard restore || true
+    nmcli networking off >/dev/null 2>&1; sleep 5; nmcli networking on >/dev/null 2>&1
+    ;;
+  2)
+    log "step 2: restarting NetworkManager"
+    systemctl restart NetworkManager || true
+    ;;
+  3)
+    log "step 3: unblocking radios, forcing links up, re-activating connections"
+    rfkill unblock all >/dev/null 2>&1 || true
+    for i in eth0 wlan0; do ip link set "$i" up >/dev/null 2>&1 || true; done
+    sleep 5
+    reactivate_all
+    ;;
+  *)
+    now=$(date +%s)
+    last=$(cat "$REBOOT_FILE" 2>/dev/null || echo 0)
+    up=$(uptime_secs)
+    if [ "$up" -lt "$MIN_UPTIME" ]; then
+      log "step 4: would reboot, but uptime is only ${up}s — holding off to avoid a boot loop"
+    elif [ $(( now - last )) -lt "$REBOOT_COOLDOWN" ]; then
+      log "step 4: would reboot, but last watchdog reboot was $(( now - last ))s ago — holding off"
+      # Keep trying the cheaper remedies rather than doing nothing.
+      reactivate_all
+    else
+      log "step 4: still offline after $fails checks — rebooting"
+      echo "$now" > "$REBOOT_FILE"; sync
+      systemctl reboot
+    fi
+    ;;
+esac

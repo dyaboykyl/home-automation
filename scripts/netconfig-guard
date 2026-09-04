@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+#
+# netconfig-guard — protect the Pi's network configuration from unclean shutdowns.
+#
+# A power cut can leave an ext4 file present but truncated to zero bytes: the
+# metadata reaches the journal, the data blocks never do. That is exactly how
+# this Pi lost its Wi-Fi profile after a surge and fell off the network with no
+# way back in except a keyboard and a monitor.
+#
+#   backup    snapshot every non-empty network config file. Run from the
+#             NetworkManager dispatcher after a successful connection, and on a
+#             timer as a safety net.
+#   restore   put back any config file that is now missing or zero-length. Run
+#             at boot, ordered before NetworkManager starts.
+#   status    show what is currently protected.
+#
+# Restore never touches a file that still has content, so deliberately editing a
+# connection is always safe. Backup only prunes an entry when the live file is
+# gone *and* networking is currently healthy — meaning the deletion was
+# deliberate — so a corruption event can never destroy the backup that fixes it.
+
+set -euo pipefail
+
+BACKUP_ROOT=/var/backups/netconfig
+SOURCE_DIRS=(/etc/NetworkManager/system-connections /etc/netplan)
+TAG=netconfig-guard
+
+log() { logger -t "$TAG" -- "$*" 2>/dev/null || true; echo "$TAG: $*"; }
+
+# A config file is worth backing up only if it has content and looks like the
+# real thing — never snapshot a half-written or already-corrupted file.
+valid_config() {
+  local f="$1"
+  [ -s "$f" ] || return 1
+  case "$f" in
+    *.nmconnection) grep -q '^\[connection\]' "$f" ;;
+    *.yaml|*.yml)   grep -q '^[[:space:]]*network:' "$f" ;;
+    *)              return 1 ;;
+  esac
+}
+
+# "Healthy" = some real device is connected. Used to decide whether a missing
+# file was a deliberate deletion (healthy) or collateral damage (not healthy).
+network_healthy() {
+  nmcli -t -f DEVICE,STATE device status 2>/dev/null \
+    | grep -vE '^(lo|p2p-)' | grep -q ':connected$'
+}
+
+collect_sources() {
+  local d
+  for d in "${SOURCE_DIRS[@]}"; do
+    [ -d "$d" ] || continue
+    find "$d" -maxdepth 1 -type f \( -name '*.nmconnection' -o -name '*.yaml' -o -name '*.yml' \) 2>/dev/null
+  done
+}
+
+do_backup() {
+  local healthy=no; network_healthy && healthy=yes
+  local saved=0 pruned=0 skipped=0 f dest
+
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    dest="${BACKUP_ROOT}${f}"
+    if valid_config "$f"; then
+      mkdir -p "$(dirname "$dest")"
+      # Keep one previous generation, then write atomically and force the new
+      # copy to disk — a backup still sitting in the page cache is no backup.
+      [ -f "$dest" ] && cp -p "$dest" "${dest}.prev" 2>/dev/null || true
+      cp -p "$f" "${dest}.tmp"
+      sync "${dest}.tmp"
+      mv -f "${dest}.tmp" "$dest"
+      chmod 600 "$dest"
+      saved=$((saved + 1))
+    else
+      log "WARNING: refusing to back up $f (empty or unrecognised) — keeping previous copy"
+      skipped=$((skipped + 1))
+    fi
+  done < <(collect_sources)
+
+  # Prune only when we can tell a deletion was intentional.
+  if [ "$healthy" = yes ]; then
+    while IFS= read -r dest; do
+      [ -n "$dest" ] || continue
+      local live="${dest#$BACKUP_ROOT}"
+      if [ ! -e "$live" ]; then
+        rm -f "$dest" "${dest}.prev"
+        log "pruned backup of $live (deleted while network healthy — treating as intentional)"
+        pruned=$((pruned + 1))
+      fi
+    done < <(find "$BACKUP_ROOT" -type f -name '*.nmconnection' -o -type f -name '*.yaml' 2>/dev/null | grep -v '\.prev$' || true)
+  fi
+
+  sync
+  log "backup complete: ${saved} protected, ${skipped} skipped, ${pruned} pruned (healthy=${healthy})"
+}
+
+do_restore() {
+  local restored=0 netplan_touched=no dest live
+
+  [ -d "$BACKUP_ROOT" ] || { log "no backup directory yet — nothing to restore"; return 0; }
+
+  while IFS= read -r dest; do
+    [ -n "$dest" ] || continue
+    live="${dest#$BACKUP_ROOT}"
+    # Only ever act on unambiguous loss: gone, or present but zero bytes.
+    if [ ! -e "$live" ] || [ ! -s "$live" ]; then
+      mkdir -p "$(dirname "$live")"
+      cp -p "$dest" "${live}.restoring"
+      sync "${live}.restoring"
+      mv -f "${live}.restoring" "$live"
+      chown root:root "$live"; chmod 600 "$live"
+      log "RESTORED $live from backup (was $([ -e "$live" ] && echo 'zero-length' || echo 'missing'))"
+      restored=$((restored + 1))
+      case "$live" in /etc/netplan/*) netplan_touched=yes ;; esac
+    fi
+  done < <(find "$BACKUP_ROOT" -type f \( -name '*.nmconnection' -o -name '*.yaml' -o -name '*.yml' \) 2>/dev/null | grep -v '\.prev$' || true)
+
+  # netplan renders /etc/netplan into /run at boot via a systemd generator, which
+  # has already run by the time this unit executes. Re-render so NetworkManager
+  # sees the profile we just put back.
+  if [ "$netplan_touched" = yes ] && command -v netplan >/dev/null 2>&1; then
+    netplan generate && log "re-ran 'netplan generate' after restoring netplan config"
+  fi
+
+  sync
+  [ "$restored" -eq 0 ] && log "restore check: all network config intact" \
+                        || log "restore complete: ${restored} file(s) recovered"
+}
+
+do_status() {
+  echo "Protected network configuration (backup root: $BACKUP_ROOT)"
+  echo
+  local dest live state
+  if [ ! -d "$BACKUP_ROOT" ]; then echo "  (no backups yet)"; return 0; fi
+  while IFS= read -r dest; do
+    [ -n "$dest" ] || continue
+    live="${dest#$BACKUP_ROOT}"
+    if   [ ! -e "$live" ]; then state="MISSING  (will be restored at next boot)"
+    elif [ ! -s "$live" ]; then state="ZERO-LEN (will be restored at next boot)"
+    else                        state="ok"
+    fi
+    printf '  %-8s %s\n' "$state" "$live"
+  done < <(find "$BACKUP_ROOT" -type f \( -name '*.nmconnection' -o -name '*.yaml' \) 2>/dev/null | grep -v '\.prev$' | sort || true)
+  echo
+  echo -n "network currently healthy: "; network_healthy && echo yes || echo no
+}
+
+case "${1:-}" in
+  backup)  do_backup ;;
+  restore) do_restore ;;
+  status)  do_status ;;
+  *) echo "usage: $(basename "$0") {backup|restore|status}" >&2; exit 2 ;;
+esac

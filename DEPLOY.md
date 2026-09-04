@@ -137,6 +137,53 @@ If you edit `config.yaml`, just restart the service to pick up changes:
 sudo systemctl restart switchbot-thermostat.service
 ```
 
+## Staying reachable
+
+A power surge once left this Pi booting perfectly but invisible on the network.
+The unclean shutdown truncated its saved Wi-Fi profile to zero bytes — the file
+was still there, just empty — so NetworkManager had nothing to connect with,
+`wlan0` sat at `NO-CARRIER`, and nothing answered `thermostat.local`. It looked
+exactly like a dead Pi, and recovering it needed physical access.
+
+`scripts/harden-network.sh` (run automatically by `install.sh`, and re-runnable
+any time with `thermostat harden`) installs five independent layers so that no
+single failure can hide the Pi again:
+
+| Layer | What it does |
+|---|---|
+| `netconfig-guard` | Snapshots every network config file to `/var/backups/netconfig` after each successful connection. At boot, *before* NetworkManager starts, restores any file that is missing or zero-length. |
+| `net-watchdog` | Every 5 min, checks it can reach the default gateway. On failure it escalates: restore config → restart NetworkManager → unblock radios and re-activate everything → reboot (rate-limited to once an hour, never within 10 min of boot). |
+| Hardware watchdog | Already enabled by Raspberry Pi OS. A wedged kernel resets the board instead of hanging powered-on-but-dead. |
+| Static fallback IPs | `192.168.1.250` on `eth0`, `192.168.1.251` on `wlan0`, *alongside* DHCP. These work with no DHCP server and no mDNS. |
+| Infinite autoconnect | NetworkManager defaults to giving up after 4 failed attempts. Set to retry forever — on a headless box, giving up is a one-way trip offline. |
+
+`scripts/thermostat` matches this on the client side: it tries the SSH alias,
+then mDNS, then the static addresses, so a broken `.local` cannot lock you out.
+
+Useful commands:
+
+```bash
+thermostat where        # which address answered, and how
+thermostat netstatus    # guard status, units, addresses, watchdog
+thermostat harden       # re-install the layers (idempotent)
+thermostat wifi <ssid>  # set Wi-Fi credentials; prompts, never echoes,
+                        # and the secret never enters argv or shell history
+```
+
+The guard is deliberately conservative. It only ever restores a file that is
+**missing or zero-length**, so editing a connection by hand is always safe; and
+it refuses to snapshot an empty file, so a corruption event cannot overwrite the
+good backup that fixes it. It only forgets a profile you deleted when the network
+is healthy at the time — meaning the deletion was deliberate.
+
+Two things it cannot do in software, worth knowing:
+
+- **It does not prevent SD card corruption.** It makes the network config
+  recoverable, but other files remain at risk. A UPS, or even a cheap surge
+  protector, is the real fix for the underlying cause.
+- **Wired Ethernet remains the most reliable option.** With the cable in, Wi-Fi
+  becomes a redundant second path rather than the only one.
+
 ## Troubleshooting
 
 | symptom | fix |
@@ -148,3 +195,6 @@ sudo systemctl restart switchbot-thermostat.service
 | Heat toggles too often | raise `control.hysteresis` and/or `control.min_cycle_time` |
 | State seems "stuck" after manual changes | delete `state.json` and restart to reset the believed on/off state |
 | Pi drops off the network while idle (`.local` and IP both unreachable, but PWR LED solid) | Wi-Fi power-save on the Pi 3's shared radio. `install.sh` disables it via the `wifi-powersave-off.service`; check `iw dev wlan0 get power_save` (should say "off"). For a 24/7 setup, wired **Ethernet** is the most reliable fix. |
+| Unreachable after a power cut; `thermostat.local` does not resolve | Try `thermostat where` — it falls back to the static addresses. On the Pi, `sudo netconfig-guard status` shows whether a config file was lost; `journalctl -b -u netconfig-guard-restore` shows what was restored at boot. |
+| `wlan0` shows `NO-CARRIER` and `nmcli connection show` lists no Wi-Fi profile | The saved profile was lost. `sudo netconfig-guard restore` recovers it from the last snapshot; if there is no snapshot, re-add it with `thermostat wifi <ssid>`. |
+| Pi 3 Model B cannot see your network | Its BCM43430 radio is **2.4 GHz only**. If your router advertises separate names per band, it needs the 2.4 GHz SSID. Check what it can actually see with `nmcli device wifi list`. |

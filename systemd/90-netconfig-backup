@@ -1,0 +1,7 @@
+#!/bin/sh
+# NetworkManager dispatcher hook: snapshot the config whenever a connection
+# comes up, so a newly added Wi-Fi profile is protected within seconds rather
+# than waiting for the daily timer.
+[ "$2" = "up" ] || exit 0
+systemctl start --no-block netconfig-guard-backup.service 2>/dev/null || true
+exit 0

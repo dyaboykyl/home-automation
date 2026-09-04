@@ -58,6 +58,12 @@ sudo cp "${TMP_SERVICE}" "/etc/systemd/system/${SERVICE_NAME}"
 rm -f "${TMP_SERVICE}"
 sudo systemctl daemon-reload
 
+# A headless Pi with no keyboard attached has to be able to recover its own
+# network. Installs the config guard, the connectivity watchdog, the hardware
+# watchdog and the static fallback addresses. Safe to re-run.
+echo "==> Hardening the network against config loss and dropouts..."
+sudo bash "${REPO_DIR}/scripts/harden-network.sh"
+
 cat <<EOF
 
 Done.

@@ -1,0 +1,8 @@
+[Unit]
+Description=Recover the Pi's network connectivity if it drops
+After=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/net-watchdog
+TimeoutStartSec=300
